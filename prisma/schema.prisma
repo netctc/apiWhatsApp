@@ -52,6 +52,9 @@ enum MessageType {
   INTERACTIVE
   LOCATION
   CONTACT
+  STICKER
+  REACTION
+  UNKNOWN
 }
 
 model Tenant {
@@ -104,22 +107,22 @@ model WhatsAppChannel {
 }
 
 model Contact {
-  id                           String               @id @default(uuid()) @db.Uuid
-  tenantId                     String               @db.Uuid
-  phoneNumber                  String               @db.VarChar(32)
-  name                         String?              @db.VarChar(160)
-  language                     String?              @db.VarChar(20)
-  timezone                     String?              @db.VarChar(80)
-  metadata                     Json?
-  optInStatus                  ConsentStatus        @default(UNKNOWN)
-  optInUpdatedAt               DateTime?
+  id                             String                @id @default(uuid()) @db.Uuid
+  tenantId                       String                @db.Uuid
+  phoneNumber                    String                @db.VarChar(32)
+  name                           String?               @db.VarChar(160)
+  language                       String?               @db.VarChar(20)
+  timezone                       String?               @db.VarChar(80)
+  metadata                       Json?
+  optInStatus                    ConsentStatus         @default(UNKNOWN)
+  optInUpdatedAt                 DateTime?
   customerServiceWindowExpiresAt DateTime?
-  lastInboundAt                DateTime?
-  createdAt                    DateTime             @default(now())
-  updatedAt                    DateTime             @updatedAt
-  tenant                       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  consentEvents                ContactConsentEvent[]
-  messages                     Message[]
+  lastInboundAt                  DateTime?
+  createdAt                      DateTime              @default(now())
+  updatedAt                      DateTime              @updatedAt
+  tenant                         Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  consentEvents                  ContactConsentEvent[]
+  messages                       Message[]
 
   @@unique([tenantId, phoneNumber])
   @@index([tenantId, optInStatus, updatedAt])
@@ -161,6 +164,7 @@ model Message {
   attemptCount         Int              @default(0)
   lastAttemptAt        DateTime?
   processingLeaseUntil DateTime?
+  providerTimestamp    DateTime?
   createdAt            DateTime         @default(now())
   updatedAt            DateTime         @updatedAt
   submittedAt          DateTime?
@@ -212,7 +216,7 @@ model OutboxEvent {
   aggregateType        String
   aggregateId          String   @db.Uuid
   eventType            String
-  payload              Json
+  payload               Json
   attempts             Int      @default(0)
   nextAttemptAt        DateTime @default(now())
   processingLeaseUntil DateTime?
