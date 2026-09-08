@@ -26,6 +26,9 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/api_whatsapp?schema=public
 
+      - name: Lint source and tests
+        run: npm run lint
+
       - name: Build application
         run: npm run build
 
