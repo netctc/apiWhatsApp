@@ -33,7 +33,7 @@ export class ApiKeyGuard implements CanActivate {
       throw new UnauthorizedException("Conflicting API credentials");
     }
 
-    return bearer ?? headerKey?.trim() || undefined;
+    return bearer ?? (headerKey?.trim() || undefined);
   }
 
   private extractBearerToken(authorization?: string): string | undefined {
