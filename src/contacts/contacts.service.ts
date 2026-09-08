@@ -75,21 +75,21 @@ export class ContactsService {
       : ConsentStatus.OPTED_OUT;
 
     return this.prisma.$transaction(async (transaction) => {
-      const existing = await transaction.contact.findFirst({
-        where: { id, tenantId },
-      });
-      if (!existing) {
+      const locked = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT "id"
+        FROM "Contact"
+        WHERE "id" = ${id}::uuid
+          AND "tenantId" = ${tenantId}::uuid
+        FOR UPDATE
+      `);
+      if (locked.length === 0) {
         throw new NotFoundException("Contact not found");
       }
 
-      const contact = await transaction.contact.update({
-        where: { id },
-        data: {
-          consentStatus: status,
-          consentSource: dto.source,
-          consentAt: status === ConsentStatus.OPTED_IN ? occurredAt : existing.consentAt,
-          optedOutAt: status === ConsentStatus.OPTED_OUT ? occurredAt : null,
-        },
+      const existing = await transaction.contact.findUniqueOrThrow({ where: { id } });
+      const latestEvent = await transaction.contactConsentEvent.findFirst({
+        where: { tenantId, contactId: id },
+        orderBy: [{ occurredAt: "desc" }, { createdAt: "desc" }],
       });
 
       const event = await transaction.contactConsentEvent.create({
@@ -100,6 +100,21 @@ export class ContactsService {
           source: dto.source,
           occurredAt,
           evidence: dto.evidence ? this.toJson(dto.evidence) : undefined,
+        },
+      });
+
+      const isCurrentDecision = !latestEvent || occurredAt.getTime() >= latestEvent.occurredAt.getTime();
+      if (!isCurrentDecision) {
+        return { contact: existing, event };
+      }
+
+      const contact = await transaction.contact.update({
+        where: { id },
+        data: {
+          consentStatus: status,
+          consentSource: dto.source,
+          consentAt: status === ConsentStatus.OPTED_IN ? occurredAt : existing.consentAt,
+          optedOutAt: status === ConsentStatus.OPTED_OUT ? occurredAt : null,
         },
       });
 
