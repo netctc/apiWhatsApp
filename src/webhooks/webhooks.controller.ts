@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Post, Query, RawBodyRequest, Req, UnauthorizedException } from "@nestjs/common";
 import type { Request } from "express";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 @Controller("v1/webhooks/meta/whatsapp")
@@ -30,7 +31,7 @@ export class WebhooksController {
     this.verifySignature(request.rawBody, signature);
 
     await this.prisma.webhookEvent.create({
-      data: { payload },
+      data: { payload: this.toJson(payload) },
     });
 
     return { received: true };
@@ -49,5 +50,9 @@ export class WebhooksController {
     if (expectedBuffer.length !== actualBuffer.length || !timingSafeEqual(expectedBuffer, actualBuffer)) {
       throw new UnauthorizedException("Invalid webhook signature");
     }
+  }
+
+  private toJson(value: unknown): Prisma.InputJsonValue {
+    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
   }
 }
