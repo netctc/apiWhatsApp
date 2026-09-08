@@ -24,6 +24,7 @@ CREATE TABLE "Message" (
     "errorMessage" TEXT,
     "attemptCount" INTEGER NOT NULL DEFAULT 0,
     "lastAttemptAt" TIMESTAMP(3),
+    "processingLeaseUntil" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
     "submittedAt" TIMESTAMP(3),
@@ -52,6 +53,10 @@ CREATE TABLE "WebhookEvent" (
     "providerEventId" TEXT,
     "payload" JSONB NOT NULL,
     "processed" BOOLEAN NOT NULL DEFAULT false,
+    "attemptCount" INTEGER NOT NULL DEFAULT 0,
+    "nextAttemptAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "processingLeaseUntil" TIMESTAMP(3),
+    "lastError" TEXT,
     "receivedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "processedAt" TIMESTAMP(3),
 
@@ -67,6 +72,7 @@ CREATE TABLE "OutboxEvent" (
     "payload" JSONB NOT NULL,
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "nextAttemptAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "processingLeaseUntil" TIMESTAMP(3),
     "lastError" TEXT,
     "publishedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -85,7 +91,7 @@ CREATE UNIQUE INDEX "Message_idempotencyKey_key" ON "Message"("idempotencyKey");
 CREATE INDEX "Message_tenantId_createdAt_idx" ON "Message"("tenantId", "createdAt");
 
 -- CreateIndex
-CREATE INDEX "Message_status_createdAt_idx" ON "Message"("status", "createdAt");
+CREATE INDEX "Message_status_processingLeaseUntil_createdAt_idx" ON "Message"("status", "processingLeaseUntil", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "Message_to_createdAt_idx" ON "Message"("to", "createdAt");
@@ -97,10 +103,10 @@ CREATE INDEX "MessageStatusEvent_messageId_createdAt_idx" ON "MessageStatusEvent
 CREATE UNIQUE INDEX "WebhookEvent_providerEventId_key" ON "WebhookEvent"("providerEventId");
 
 -- CreateIndex
-CREATE INDEX "WebhookEvent_processed_receivedAt_idx" ON "WebhookEvent"("processed", "receivedAt");
+CREATE INDEX "WebhookEvent_processed_nextAttemptAt_processingLeaseUntil_receivedAt_idx" ON "WebhookEvent"("processed", "nextAttemptAt", "processingLeaseUntil", "receivedAt");
 
 -- CreateIndex
-CREATE INDEX "OutboxEvent_publishedAt_nextAttemptAt_createdAt_idx" ON "OutboxEvent"("publishedAt", "nextAttemptAt", "createdAt");
+CREATE INDEX "OutboxEvent_publishedAt_nextAttemptAt_processingLeaseUntil_createdAt_idx" ON "OutboxEvent"("publishedAt", "nextAttemptAt", "processingLeaseUntil", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "OutboxEvent_aggregateType_aggregateId_idx" ON "OutboxEvent"("aggregateType", "aggregateId");
