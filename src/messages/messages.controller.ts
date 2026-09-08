@@ -10,16 +10,22 @@ import {
   Param,
   Post,
 } from "@nestjs/common";
-import { ApiHeader, ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
+import { ApiHeader, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from "@nestjs/swagger";
+import { ApiScope } from "../auth/auth.constants.js";
+import type { ApiPrincipal } from "../auth/auth.types.js";
+import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
+import { RequireScopes } from "../auth/require-scopes.decorator.js";
 import { CreateMessageDto } from "./dto/create-message.dto.js";
 import { MessagesService } from "./messages.service.js";
 
 @ApiTags("messages")
+@ApiSecurity("apiKey")
 @Controller("v1/messages")
 export class MessagesController {
   constructor(private readonly messagesService: MessagesService) {}
 
   @Post()
+  @RequireScopes(ApiScope.MESSAGES_WRITE)
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({ summary: "Accept an outbound WhatsApp message for asynchronous delivery" })
   @ApiHeader({
@@ -29,11 +35,12 @@ export class MessagesController {
   })
   @ApiResponse({ status: HttpStatus.ACCEPTED, description: "Message accepted and queued" })
   async create(
+    @CurrentPrincipal() principal: ApiPrincipal,
     @Body() dto: CreateMessageDto,
     @Headers("idempotency-key") idempotencyHeader?: string,
   ) {
     const idempotencyKey = this.resolveIdempotencyKey(idempotencyHeader, dto.idempotencyKey);
-    const message = await this.messagesService.create({
+    const message = await this.messagesService.create(principal.tenantId, {
       ...dto,
       ...(idempotencyKey ? { idempotencyKey } : {}),
     });
@@ -46,9 +53,10 @@ export class MessagesController {
   }
 
   @Get(":id")
+  @RequireScopes(ApiScope.MESSAGES_READ)
   @ApiOperation({ summary: "Get a message and its status history" })
-  async findById(@Param("id") id: string) {
-    const message = await this.messagesService.findById(id);
+  async findById(@CurrentPrincipal() principal: ApiPrincipal, @Param("id") id: string) {
+    const message = await this.messagesService.findById(principal.tenantId, id);
     if (!message) {
       throw new NotFoundException("Message not found");
     }

@@ -1,18 +1,23 @@
 import { ConflictException, Injectable } from "@nestjs/common";
+import { normalizePhoneNumber } from "../contacts/phone.util.js";
 import { MessageDirection, MessageStatus, MessageType, Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
+import { OutboundPolicyService } from "./outbound-policy.service.js";
 
 const OUTBOUND_REQUESTED_EVENT = "message.outbound.requested";
 
 @Injectable()
 export class MessagesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly outboundPolicy: OutboundPolicyService,
+  ) {}
 
-  async create(dto: CreateMessageDto) {
+  async create(tenantId: string, dto: CreateMessageDto) {
     if (dto.idempotencyKey) {
-      const existing = await this.prisma.message.findUnique({
-        where: { idempotencyKey: dto.idempotencyKey },
+      const existing = await this.prisma.message.findFirst({
+        where: { tenantId, idempotencyKey: dto.idempotencyKey },
       });
 
       if (existing) {
@@ -20,14 +25,18 @@ export class MessagesService {
       }
     }
 
+    await this.outboundPolicy.assertAllowed(tenantId, dto.to, dto.type);
+    const normalizedTo = normalizePhoneNumber(dto.to);
+
     try {
       return await this.prisma.$transaction(async (transaction) => {
         const message = await transaction.message.create({
           data: {
+            tenantId,
             direction: MessageDirection.OUTBOUND,
             type: this.mapType(dto.type),
             status: MessageStatus.QUEUED,
-            to: dto.to,
+            to: normalizedTo,
             idempotencyKey: dto.idempotencyKey,
             payload: this.toJson(dto.payload),
             statusEvents: {
@@ -49,8 +58,8 @@ export class MessagesService {
       });
     } catch (error) {
       if (dto.idempotencyKey) {
-        const existing = await this.prisma.message.findUnique({
-          where: { idempotencyKey: dto.idempotencyKey },
+        const existing = await this.prisma.message.findFirst({
+          where: { tenantId, idempotencyKey: dto.idempotencyKey },
         });
         if (existing) {
           return existing;
@@ -60,9 +69,9 @@ export class MessagesService {
     }
   }
 
-  async findById(id: string) {
-    return this.prisma.message.findUnique({
-      where: { id },
+  async findById(tenantId: string, id: string) {
+    return this.prisma.message.findFirst({
+      where: { id, tenantId },
       include: { statusEvents: { orderBy: { createdAt: "asc" } } },
     });
   }

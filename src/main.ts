@@ -19,7 +19,16 @@ async function bootstrap(): Promise<void> {
   const swaggerConfig = new DocumentBuilder()
     .setTitle("apiWhatsApp")
     .setDescription("Enterprise WhatsApp Business Platform API")
-    .setVersion("0.1.0")
+    .setVersion("0.2.0")
+    .addApiKey(
+      {
+        type: "apiKey",
+        in: "header",
+        name: "X-API-Key",
+        description: "Tenant API key. Raw keys are shown only when provisioned.",
+      },
+      "apiKey",
+    )
     .build();
 
   SwaggerModule.setup("docs", app, SwaggerModule.createDocument(app, swaggerConfig));
