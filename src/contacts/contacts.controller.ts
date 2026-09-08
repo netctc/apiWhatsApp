@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Patch, Post } from "@nestjs/common";
 import { ApiSecurity, ApiTags } from "@nestjs/swagger";
 import { ApiScope } from "../auth/auth.constants.js";
-import { ApiPrincipal } from "../auth/auth.types.js";
+import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
 import { RequireScopes } from "../auth/require-scopes.decorator.js";
 import { ContactsService } from "./contacts.service.js";
