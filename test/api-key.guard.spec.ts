@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import { UnauthorizedException } from "@nestjs/common";
 import type { ExecutionContext } from "@nestjs/common";
 import { TenantStatus } from "../src/generated/prisma/client.js";
