@@ -13,9 +13,11 @@ import {
 import type { RawBodyRequest } from "@nestjs/common";
 import type { Request } from "express";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { Public } from "../auth/public.decorator.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
+@Public()
 @Controller("v1/webhooks/meta/whatsapp")
 export class WebhooksController {
   constructor(private readonly prisma: PrismaService) {}
