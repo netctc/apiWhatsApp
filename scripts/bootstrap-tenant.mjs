@@ -52,6 +52,9 @@ try {
           "contacts:write",
           "phone_numbers:read",
           "phone_numbers:write",
+          "api_keys:read",
+          "api_keys:write",
+          "audit:read",
         ],
       },
     });

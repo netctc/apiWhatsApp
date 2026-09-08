@@ -8,13 +8,9 @@ export enum ApiScope {
   CONTACTS_WRITE = "contacts:write",
   PHONE_NUMBERS_READ = "phone_numbers:read",
   PHONE_NUMBERS_WRITE = "phone_numbers:write",
+  API_KEYS_READ = "api_keys:read",
+  API_KEYS_WRITE = "api_keys:write",
+  AUDIT_READ = "audit:read",
 }
 
-export const DEFAULT_API_SCOPES: ApiScope[] = [
-  ApiScope.MESSAGES_READ,
-  ApiScope.MESSAGES_WRITE,
-  ApiScope.CONTACTS_READ,
-  ApiScope.CONTACTS_WRITE,
-  ApiScope.PHONE_NUMBERS_READ,
-  ApiScope.PHONE_NUMBERS_WRITE,
-];
+export const DEFAULT_API_SCOPES: ApiScope[] = Object.values(ApiScope);

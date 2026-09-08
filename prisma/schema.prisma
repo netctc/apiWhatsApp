@@ -62,23 +62,44 @@ model Tenant {
   messages     Message[]
   consents     ContactConsentEvent[]
   phoneNumbers WhatsAppPhoneNumber[]
+  auditLogs    AuditLog[]
 }
 
 model ApiKey {
-  id         String   @id @default(uuid()) @db.Uuid
-  tenantId   String   @db.Uuid
+  id         String     @id @default(uuid()) @db.Uuid
+  tenantId   String     @db.Uuid
   name       String
   prefix     String
-  keyHash    String   @unique
+  keyHash    String     @unique
   scopes     String[]
-  active     Boolean  @default(true)
+  active     Boolean    @default(true)
   lastUsedAt DateTime?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime   @default(now())
   revokedAt  DateTime?
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  auditLogs  AuditLog[] @relation("AuditActorApiKey")
 
   @@index([tenantId, active])
   @@index([prefix])
+}
+
+model AuditLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @db.Uuid
+  actorApiKeyId String?  @db.Uuid
+  action        String
+  entityType    String
+  entityId      String?
+  metadata      Json?
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime @default(now())
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actorApiKey   ApiKey?  @relation("AuditActorApiKey", fields: [actorApiKeyId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action, createdAt])
+  @@index([tenantId, entityType, entityId, createdAt])
 }
 
 model WhatsAppPhoneNumber {
@@ -140,32 +161,32 @@ model ContactConsentEvent {
 }
 
 model Message {
-  id                   String              @id @default(uuid()) @db.Uuid
-  tenantId             String?             @db.Uuid
-  senderId             String?             @db.Uuid
+  id                   String               @id @default(uuid()) @db.Uuid
+  tenantId             String?              @db.Uuid
+  senderId             String?              @db.Uuid
   direction            MessageDirection
   type                 MessageType
-  status               MessageStatus       @default(CREATED)
+  status               MessageStatus        @default(CREATED)
   to                   String?
   from                 String?
-  providerMessageId    String?             @unique
+  providerMessageId    String?              @unique
   providerTimestamp    DateTime?
   idempotencyKey       String?
   payload              Json
   providerResponse     Json?
   errorCode            String?
   errorMessage         String?
-  attemptCount         Int                 @default(0)
+  attemptCount         Int                  @default(0)
   lastAttemptAt        DateTime?
   processingLeaseUntil DateTime?
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
   submittedAt          DateTime?
   sentAt               DateTime?
   deliveredAt          DateTime?
   readAt               DateTime?
   failedAt             DateTime?
-  tenant               Tenant?             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  tenant               Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   sender               WhatsAppPhoneNumber? @relation(fields: [senderId], references: [id], onDelete: Restrict)
   statusEvents         MessageStatusEvent[]
 
