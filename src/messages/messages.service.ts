@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from "@nestjs/common";
-import { MessageDirection, MessageStatus, MessageType } from "../generated/prisma/client.js";
+import { MessageDirection, MessageStatus, MessageType, Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
 
@@ -29,7 +29,7 @@ export class MessagesService {
             status: MessageStatus.QUEUED,
             to: dto.to,
             idempotencyKey: dto.idempotencyKey,
-            payload: dto.payload,
+            payload: this.toJson(dto.payload),
             statusEvents: {
               create: { status: MessageStatus.QUEUED },
             },
@@ -74,5 +74,9 @@ export class MessagesService {
       case OutboundMessageType.TEMPLATE:
         return MessageType.TEMPLATE;
     }
+  }
+
+  private toJson(value: unknown): Prisma.InputJsonValue {
+    return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
   }
 }
