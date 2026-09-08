@@ -22,7 +22,7 @@ export class PhoneNumbersService {
           where: { tenantId, active: true },
           select: { id: true },
         });
-        const isDefault = dto.isDefault ?? !existingActive;
+        const isDefault = !existingActive || dto.isDefault === true;
 
         if (isDefault) {
           await transaction.whatsAppPhoneNumber.updateMany({
@@ -79,12 +79,12 @@ export class PhoneNumbersService {
       }
 
       const willBeActive = dto.active ?? existing.active;
-      const willBeDefault = dto.isDefault ?? existing.isDefault;
-      if (willBeDefault && !willBeActive) {
+      const requestedDefault = dto.isDefault ?? (dto.active === false ? false : existing.isDefault);
+      if (dto.isDefault === true && !willBeActive) {
         throw new BadRequestException("An inactive WhatsApp phone number cannot be the default sender");
       }
 
-      if (willBeDefault && willBeActive) {
+      if (requestedDefault && willBeActive) {
         await transaction.whatsAppPhoneNumber.updateMany({
           where: { tenantId, id: { not: id }, isDefault: true },
           data: { isDefault: false },
@@ -100,7 +100,7 @@ export class PhoneNumbersService {
           credentialRef: dto.credentialRef,
           rateLimitPerSecond: dto.rateLimitPerSecond,
           active: dto.active,
-          isDefault: dto.isDefault,
+          isDefault: dto.isDefault ?? (dto.active === false ? false : undefined),
         },
       });
 
