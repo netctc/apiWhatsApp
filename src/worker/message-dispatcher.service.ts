@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { MessageStatus, Prisma } from "../generated/prisma/client.js";
+import { Message, MessageStatus, Prisma } from "../generated/prisma/client.js";
 import { MetaApiError } from "../meta/meta-api.error.js";
 import { MetaWhatsAppClient } from "../meta/meta-whatsapp.client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
@@ -27,30 +27,34 @@ export class MessageDispatcherService {
   ) {}
 
   async dispatch(job: OutboundQueueJob): Promise<QueueProcessingResult> {
-    const message = await this.prisma.message.findUnique({ where: { id: job.messageId } });
+    const claim = await this.claimMessage(job.messageId);
+    if (!claim.claimed) {
+      if (!claim.message) {
+        this.logger.warn(`Ignoring queue job for missing message ${job.messageId}`);
+        return { action: "ack" };
+      }
+
+      if (claim.message.providerMessageId || TERMINAL_OR_SUBMITTED_STATUSES.has(claim.message.status)) {
+        return { action: "ack" };
+      }
+
+      if (claim.message.status === MessageStatus.PROCESSING) {
+        return { action: "retry", reason: "Message is currently leased by another worker" };
+      }
+
+      return { action: "ack" };
+    }
+
+    const message = claim.message;
     if (!message) {
-      this.logger.warn(`Ignoring queue job for missing message ${job.messageId}`);
-      return { action: "ack" };
+      return { action: "retry", reason: "Claimed message could not be reloaded" };
     }
 
-    if (message.providerMessageId || TERMINAL_OR_SUBMITTED_STATUSES.has(message.status)) {
-      return { action: "ack" };
-    }
-
-    await this.prisma.message.update({
-      where: { id: message.id },
+    await this.prisma.messageStatusEvent.create({
       data: {
+        messageId: message.id,
         status: MessageStatus.PROCESSING,
-        attemptCount: { increment: 1 },
-        lastAttemptAt: new Date(),
-        errorCode: null,
-        errorMessage: null,
-        statusEvents: {
-          create: {
-            status: MessageStatus.PROCESSING,
-            payload: { attempt: job.attempt + 1 },
-          },
-        },
+        payload: { queueAttempt: job.attempt + 1 },
       },
     });
 
@@ -71,6 +75,7 @@ export class MessageDispatcherService {
           providerMessageId: result.providerMessageId,
           providerResponse: this.toJson(result.response),
           submittedAt: new Date(),
+          processingLeaseUntil: null,
           errorCode: null,
           errorMessage: null,
           statusEvents: {
@@ -106,11 +111,55 @@ export class MessageDispatcherService {
       return;
     }
 
+    if (
+      message.status === MessageStatus.PROCESSING &&
+      message.processingLeaseUntil &&
+      message.processingLeaseUntil.getTime() > Date.now()
+    ) {
+      this.logger.warn(`Retry job exhausted while message ${message.id} still has an active processing lease`);
+      return;
+    }
+
     await this.markFailed(
       message.id,
       "RETRY_EXHAUSTED",
-      reason ?? `Outbound retry policy exhausted after ${job.attempt + 1} attempts`,
+      reason ?? `Outbound retry policy exhausted after ${job.attempt + 1} queue attempts`,
     );
+  }
+
+  private async claimMessage(messageId: string): Promise<{ claimed: boolean; message: Message | null }> {
+    const now = new Date();
+    const leaseMs = Math.max(5000, Number(process.env.OUTBOUND_MESSAGE_LEASE_MS ?? 30000));
+    const leaseUntil = new Date(now.getTime() + leaseMs);
+
+    const result = await this.prisma.message.updateMany({
+      where: {
+        id: messageId,
+        providerMessageId: null,
+        OR: [
+          { status: MessageStatus.CREATED },
+          { status: MessageStatus.QUEUED },
+          {
+            status: MessageStatus.PROCESSING,
+            OR: [
+              { processingLeaseUntil: null },
+              { processingLeaseUntil: { lte: now } },
+            ],
+          },
+        ],
+      },
+      data: {
+        status: MessageStatus.PROCESSING,
+        attemptCount: { increment: 1 },
+        lastAttemptAt: now,
+        processingLeaseUntil: leaseUntil,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+
+    const message = await this.prisma.message.findUnique({ where: { id: messageId } });
+    return { claimed: result.count === 1, message };
   }
 
   private async markRetryableFailure(
@@ -124,6 +173,7 @@ export class MessageDispatcherService {
       where: { id: messageId },
       data: {
         status: MessageStatus.QUEUED,
+        processingLeaseUntil: null,
         errorCode,
         errorMessage: errorMessage.slice(0, 2000),
         statusEvents: {
@@ -131,7 +181,7 @@ export class MessageDispatcherService {
             status: MessageStatus.QUEUED,
             payload: this.toJson({
               retry: true,
-              attempt: attempt + 1,
+              queueAttempt: attempt + 1,
               errorCode,
               errorMessage,
               response,
@@ -152,6 +202,7 @@ export class MessageDispatcherService {
       where: { id: messageId },
       data: {
         status: MessageStatus.FAILED,
+        processingLeaseUntil: null,
         errorCode,
         errorMessage: errorMessage.slice(0, 2000),
         failedAt: new Date(),
