@@ -8,6 +8,8 @@ export enum ApiScope {
   CONTACTS_WRITE = "contacts:write",
   PHONE_NUMBERS_READ = "phone_numbers:read",
   PHONE_NUMBERS_WRITE = "phone_numbers:write",
+  TEMPLATES_READ = "templates:read",
+  TEMPLATES_WRITE = "templates:write",
   API_KEYS_READ = "api_keys:read",
   API_KEYS_WRITE = "api_keys:write",
   AUDIT_READ = "audit:read",
