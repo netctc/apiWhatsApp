@@ -12,6 +12,18 @@ enum TenantStatus {
   SUSPENDED
 }
 
+enum WhatsAppChannelStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ConsentStatus {
+  UNKNOWN
+  OPTED_IN
+  OPTED_OUT
+  REVOKED
+}
+
 enum MessageDirection {
   INBOUND
   OUTBOUND
@@ -43,14 +55,17 @@ enum MessageType {
 }
 
 model Tenant {
-  id        String       @id @default(uuid()) @db.Uuid
-  name      String       @db.VarChar(160)
-  slug      String       @unique @db.VarChar(80)
-  status    TenantStatus @default(ACTIVE)
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
-  apiKeys   ApiKey[]
-  messages  Message[]
+  id            String                @id @default(uuid()) @db.Uuid
+  name          String                @db.VarChar(160)
+  slug          String                @unique @db.VarChar(80)
+  status        TenantStatus          @default(ACTIVE)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  apiKeys       ApiKey[]
+  channels      WhatsAppChannel[]
+  contacts      Contact[]
+  consentEvents ContactConsentEvent[]
+  messages      Message[]
 }
 
 model ApiKey {
@@ -70,9 +85,68 @@ model ApiKey {
   @@index([tenantId, revokedAt, expiresAt])
 }
 
+model WhatsAppChannel {
+  id                    String                @id @default(uuid()) @db.Uuid
+  tenantId              String                @db.Uuid
+  name                  String                @db.VarChar(120)
+  providerPhoneNumberId String                @unique @db.VarChar(64)
+  wabaId                String                @db.VarChar(64)
+  displayPhoneNumber    String?               @db.VarChar(32)
+  verifiedName          String?               @db.VarChar(160)
+  status                WhatsAppChannelStatus @default(ACTIVE)
+  isDefault             Boolean               @default(false)
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  tenant                Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  messages              Message[]
+
+  @@index([tenantId, status, isDefault])
+}
+
+model Contact {
+  id                           String               @id @default(uuid()) @db.Uuid
+  tenantId                     String               @db.Uuid
+  phoneNumber                  String               @db.VarChar(32)
+  name                         String?              @db.VarChar(160)
+  language                     String?              @db.VarChar(20)
+  timezone                     String?              @db.VarChar(80)
+  metadata                     Json?
+  optInStatus                  ConsentStatus        @default(UNKNOWN)
+  optInUpdatedAt               DateTime?
+  customerServiceWindowExpiresAt DateTime?
+  lastInboundAt                DateTime?
+  createdAt                    DateTime             @default(now())
+  updatedAt                    DateTime             @updatedAt
+  tenant                       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  consentEvents                ContactConsentEvent[]
+  messages                     Message[]
+
+  @@unique([tenantId, phoneNumber])
+  @@index([tenantId, optInStatus, updatedAt])
+  @@index([tenantId, customerServiceWindowExpiresAt])
+}
+
+model ContactConsentEvent {
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @db.Uuid
+  contactId     String        @db.Uuid
+  status        ConsentStatus
+  source        String        @db.VarChar(100)
+  evidence      Json?
+  policyVersion String?       @db.VarChar(50)
+  occurredAt    DateTime      @default(now())
+  createdAt     DateTime      @default(now())
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact       Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, contactId, occurredAt])
+}
+
 model Message {
   id                   String           @id @default(uuid()) @db.Uuid
   tenantId             String?          @db.Uuid
+  channelId            String?          @db.Uuid
+  contactId            String?          @db.Uuid
   direction            MessageDirection
   type                 MessageType
   status               MessageStatus    @default(CREATED)
@@ -95,10 +169,14 @@ model Message {
   readAt               DateTime?
   failedAt             DateTime?
   tenant               Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  channel              WhatsAppChannel? @relation(fields: [channelId], references: [id], onDelete: Restrict)
+  contact              Contact?         @relation(fields: [contactId], references: [id], onDelete: SetNull)
   statusEvents         MessageStatusEvent[]
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, createdAt])
+  @@index([channelId, createdAt])
+  @@index([contactId, createdAt])
   @@index([status, processingLeaseUntil, createdAt])
   @@index([to, createdAt])
 }
