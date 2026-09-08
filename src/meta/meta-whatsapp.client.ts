@@ -18,14 +18,21 @@ export interface MetaSendMessageResult {
 export class MetaWhatsAppClient {
   constructor(private readonly config: ConfigService) {}
 
-  async sendMessage(message: OutboundMessageRecord): Promise<MetaSendMessageResult> {
+  async sendMessage(
+    message: OutboundMessageRecord,
+    providerPhoneNumberId?: string,
+  ): Promise<MetaSendMessageResult> {
     const graphVersion = this.required("META_GRAPH_API_VERSION");
-    const phoneNumberId = this.required("META_WHATSAPP_PHONE_NUMBER_ID");
+    const phoneNumberId = providerPhoneNumberId ?? this.required("META_WHATSAPP_PHONE_NUMBER_ID");
     const accessToken = this.required("META_WHATSAPP_ACCESS_TOKEN");
     const timeoutMs = Number(this.config.get("META_HTTP_TIMEOUT_MS") ?? 15000);
 
     if (!/^v\d+\.\d+$/.test(graphVersion)) {
       throw new Error("META_GRAPH_API_VERSION must use the format vNN.N");
+    }
+
+    if (!/^\d+$/.test(phoneNumberId)) {
+      throw new Error("WhatsApp provider phone number ID must contain digits only");
     }
 
     const requestBody = mapMessageToMetaPayload(message);
