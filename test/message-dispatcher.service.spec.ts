@@ -1,5 +1,6 @@
 import { jest } from "@jest/globals";
 import { MessageStatus, MessageType } from "../src/generated/prisma/client.js";
+import { MetaSenderResolverService } from "../src/meta/meta-sender-resolver.service.js";
 import { MetaWhatsAppClient } from "../src/meta/meta-whatsapp.client.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
 import { DistributedRateLimiterService } from "../src/worker/distributed-rate-limiter.service.js";
@@ -11,6 +12,7 @@ describe("MessageDispatcherService", () => {
   const messageUpdate = jest.fn();
   const statusEventCreate = jest.fn();
   const metaSendMessage = jest.fn();
+  const resolveSender = jest.fn();
   const waitForOutboundSlot = jest.fn();
 
   const prisma = {
@@ -28,17 +30,27 @@ describe("MessageDispatcherService", () => {
     sendMessage: metaSendMessage,
   } as unknown as MetaWhatsAppClient;
 
+  const senderResolver = {
+    resolve: resolveSender,
+  } as unknown as MetaSenderResolverService;
+
   const rateLimiter = {
     waitForOutboundSlot,
   } as unknown as DistributedRateLimiterService;
 
-  const service = new MessageDispatcherService(prisma, meta, rateLimiter);
+  const service = new MessageDispatcherService(prisma, meta, senderResolver, rateLimiter);
 
   beforeEach(() => {
     jest.clearAllMocks();
     statusEventCreate.mockResolvedValue({});
     messageUpdate.mockResolvedValue({});
     waitForOutboundSlot.mockResolvedValue(undefined);
+    resolveSender.mockResolvedValue({
+      internalSenderId: "ac91b20f-a54f-4a74-8c87-c09e8a5a3ba5",
+      phoneNumberId: "27681414235104944",
+      accessToken: "test-token",
+      rateLimitPerSecond: 75,
+    });
   });
 
   it("does not call Meta when another worker owns an active message lease", async () => {
@@ -59,20 +71,23 @@ describe("MessageDispatcherService", () => {
       action: "retry",
       reason: "Message is currently leased by another worker",
     });
+    expect(resolveSender).not.toHaveBeenCalled();
     expect(metaSendMessage).not.toHaveBeenCalled();
     expect(waitForOutboundSlot).not.toHaveBeenCalled();
   });
 
-  it("submits a successfully claimed message exactly once", async () => {
+  it("submits a successfully claimed message through its tenant sender", async () => {
     const message = {
       id: "8da44ab2-41d5-42da-8edc-a2c4cb4d2476",
-      tenantId: null,
+      tenantId: "123e4567-e89b-12d3-a456-426614174000",
+      senderId: "ac91b20f-a54f-4a74-8c87-c09e8a5a3ba5",
       direction: "OUTBOUND",
       type: MessageType.TEXT,
       status: MessageStatus.PROCESSING,
       to: "+96170123456",
       from: null,
       providerMessageId: null,
+      providerTimestamp: null,
       idempotencyKey: "order-48291",
       payload: { body: "Order confirmed" },
       providerResponse: null,
@@ -89,9 +104,16 @@ describe("MessageDispatcherService", () => {
       readAt: null,
       failedAt: null,
     };
+    const sender = {
+      internalSenderId: message.senderId,
+      phoneNumberId: "27681414235104944",
+      accessToken: "test-token",
+      rateLimitPerSecond: 75,
+    };
 
     messageUpdateMany.mockResolvedValue({ count: 1 });
     messageFindUnique.mockResolvedValue(message);
+    resolveSender.mockResolvedValue(sender);
     metaSendMessage.mockResolvedValue({
       providerMessageId: "wamid.test-claimed",
       response: { messages: [{ id: "wamid.test-claimed" }] },
@@ -103,9 +125,9 @@ describe("MessageDispatcherService", () => {
     });
 
     expect(result).toEqual({ action: "ack" });
-    expect(waitForOutboundSlot).toHaveBeenCalledTimes(1);
-    expect(metaSendMessage).toHaveBeenCalledTimes(1);
-    expect(metaSendMessage).toHaveBeenCalledWith(message);
+    expect(resolveSender).toHaveBeenCalledWith(message.senderId);
+    expect(waitForOutboundSlot).toHaveBeenCalledWith(sender.phoneNumberId, 75);
+    expect(metaSendMessage).toHaveBeenCalledWith(message, sender);
     expect(messageUpdate).toHaveBeenCalledWith({
       where: { id: message.id },
       data: expect.objectContaining({
