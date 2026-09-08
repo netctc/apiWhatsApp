@@ -20,6 +20,15 @@ async function bootstrap(): Promise<void> {
     .setTitle("apiWhatsApp")
     .setDescription("Enterprise WhatsApp Business Platform API")
     .setVersion("0.1.0")
+    .addBearerAuth(
+      {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "API key",
+        description: "Use a tenant API key in the form: Authorization: Bearer wapi.<prefix>.<secret>",
+      },
+      "api-key",
+    )
     .build();
 
   SwaggerModule.setup("docs", app, SwaggerModule.createDocument(app, swaggerConfig));
