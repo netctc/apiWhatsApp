@@ -1,5 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsEnum, IsObject, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
+import {
+  IsEnum,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  MinLength,
+} from "class-validator";
 
 export enum OutboundMessageType {
   TEXT = "TEXT",
@@ -18,6 +26,13 @@ export class CreateMessageDto {
   @ApiProperty({ description: "Provider-neutral message payload" })
   @IsObject()
   payload!: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description: "Internal WhatsApp channel UUID. If omitted, the tenant default channel is used.",
+  })
+  @IsOptional()
+  @IsUUID()
+  channelId?: string;
 
   @ApiPropertyOptional({
     description: "Deprecated body fallback. Prefer the Idempotency-Key HTTP header.",
