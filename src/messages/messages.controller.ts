@@ -12,7 +12,7 @@ import {
 } from "@nestjs/common";
 import { ApiHeader, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from "@nestjs/swagger";
 import { ApiScope } from "../auth/auth.constants.js";
-import { ApiPrincipal } from "../auth/auth.types.js";
+import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
 import { RequireScopes } from "../auth/require-scopes.decorator.js";
 import { CreateMessageDto } from "./dto/create-message.dto.js";
