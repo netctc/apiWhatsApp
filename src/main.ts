@@ -19,7 +19,7 @@ async function bootstrap(): Promise<void> {
   const swaggerConfig = new DocumentBuilder()
     .setTitle("apiWhatsApp")
     .setDescription("Enterprise WhatsApp Business Platform API")
-    .setVersion("0.2.0")
+    .setVersion("0.3.0")
     .addApiKey(
       {
         type: "apiKey",
