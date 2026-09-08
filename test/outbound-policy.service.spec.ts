@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import { ForbiddenException } from "@nestjs/common";
 import { ConsentStatus } from "../src/generated/prisma/client.js";
 import { OutboundMessageType } from "../src/messages/dto/create-message.dto.js";
