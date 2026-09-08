@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/common";
+import { OutboxEvent, Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { MessagingQueueService } from "../queue/messaging-queue.service.js";
 
@@ -36,14 +37,7 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
     this.flushing = true;
     try {
       const batchSize = Math.max(1, Number(process.env.OUTBOX_BATCH_SIZE ?? 50));
-      const events = await this.prisma.outboxEvent.findMany({
-        where: {
-          publishedAt: null,
-          nextAttemptAt: { lte: new Date() },
-        },
-        orderBy: { createdAt: "asc" },
-        take: batchSize,
-      });
+      const events = await this.claimEvents(batchSize);
 
       for (const event of events) {
         await this.publish(event.id, event.eventType, event.aggregateId, event.payload, event.attempts);
@@ -53,6 +47,31 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
     } finally {
       this.flushing = false;
     }
+  }
+
+  private async claimEvents(batchSize: number): Promise<OutboxEvent[]> {
+    const leaseMs = Math.max(5000, Number(process.env.OUTBOX_LEASE_MS ?? 30000));
+    const leaseUntil = new Date(Date.now() + leaseMs);
+
+    return this.prisma.$queryRaw<OutboxEvent[]>(Prisma.sql`
+      WITH candidates AS (
+        SELECT "id"
+        FROM "OutboxEvent"
+        WHERE "publishedAt" IS NULL
+          AND "nextAttemptAt" <= NOW()
+          AND ("processingLeaseUntil" IS NULL OR "processingLeaseUntil" <= NOW())
+        ORDER BY "createdAt" ASC
+        LIMIT ${batchSize}
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE "OutboxEvent" AS o
+      SET "processingLeaseUntil" = ${leaseUntil},
+          "attempts" = o."attempts" + 1,
+          "updatedAt" = NOW()
+      FROM candidates
+      WHERE o."id" = candidates."id"
+      RETURNING o.*
+    `);
   }
 
   private async publish(
@@ -74,19 +93,20 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
         where: { id: eventId },
         data: {
           publishedAt: new Date(),
+          processingLeaseUntil: null,
           lastError: null,
         },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const retryDelayMs = Math.min(60_000, 1000 * 2 ** Math.min(attempts, 6));
+      const retryDelayMs = Math.min(60_000, 1000 * 2 ** Math.min(Math.max(attempts - 1, 0), 6));
 
       await this.prisma.outboxEvent.update({
         where: { id: eventId },
         data: {
-          attempts: { increment: 1 },
           lastError: message.slice(0, 2000),
           nextAttemptAt: new Date(Date.now() + retryDelayMs),
+          processingLeaseUntil: null,
         },
       });
 
