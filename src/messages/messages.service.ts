@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from "@nestjs/common";
-import { MessageDirection, MessageStatus, MessageType } from "../../generated/prisma/client.js";
+import { MessageDirection, MessageStatus, MessageType } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
 
