@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client"
-  output   = "../generated/prisma"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -51,10 +51,10 @@ model Message {
   providerResponse   Json?
   errorCode          String?
   errorMessage       String?
-  attemptCount       Int              @default(0)
+  attemptCount       Int             @default(0)
   lastAttemptAt      DateTime?
-  createdAt          DateTime         @default(now())
-  updatedAt          DateTime         @updatedAt
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
   submittedAt        DateTime?
   sentAt             DateTime?
   deliveredAt        DateTime?
