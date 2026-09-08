@@ -9,6 +9,7 @@ import {
   NotFoundException,
   Param,
   Post,
+  Query,
 } from "@nestjs/common";
 import { ApiHeader, ApiOperation, ApiResponse, ApiSecurity, ApiTags } from "@nestjs/swagger";
 import { ApiScope } from "../auth/auth.constants.js";
@@ -16,6 +17,7 @@ import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
 import { RequireScopes } from "../auth/require-scopes.decorator.js";
 import { CreateMessageDto } from "./dto/create-message.dto.js";
+import { ListMessagesQueryDto } from "./dto/list-messages-query.dto.js";
 import { MessagesService } from "./messages.service.js";
 
 @ApiTags("messages")
@@ -50,6 +52,13 @@ export class MessagesController {
       status: message.status,
       createdAt: message.createdAt,
     };
+  }
+
+  @Get()
+  @RequireScopes(ApiScope.MESSAGES_READ)
+  @ApiOperation({ summary: "List tenant messages with cursor pagination and filters" })
+  list(@CurrentPrincipal() principal: ApiPrincipal, @Query() query: ListMessagesQueryDto) {
+    return this.messagesService.list(principal.tenantId, query);
   }
 
   @Get(":id")
