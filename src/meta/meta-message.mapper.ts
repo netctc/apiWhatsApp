@@ -1,4 +1,4 @@
-import { MessageType } from "../../generated/prisma/client.js";
+import { MessageType } from "../generated/prisma/client.js";
 
 interface OutboundMessageRecord {
   type: MessageType;
