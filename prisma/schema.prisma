@@ -62,6 +62,7 @@ model Tenant {
   messages     Message[]
   consents     ContactConsentEvent[]
   phoneNumbers WhatsAppPhoneNumber[]
+  templates    MessageTemplate[]
   auditLogs    AuditLog[]
 }
 
@@ -102,6 +103,29 @@ model AuditLog {
   @@index([tenantId, entityType, entityId, createdAt])
 }
 
+model MessageTemplate {
+  id                 String   @id @default(uuid()) @db.Uuid
+  tenantId           String   @db.Uuid
+  wabaId              String
+  providerTemplateId String?  @unique
+  name               String
+  language           String
+  category           String?
+  status             String
+  components         Json?
+  qualityScore       Json?
+  rejectionReason    String?
+  providerPayload    Json?
+  lastSyncedAt       DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  tenant             Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, wabaId, name, language])
+  @@index([tenantId, status, category])
+  @@index([tenantId, wabaId, updatedAt])
+}
+
 model WhatsAppPhoneNumber {
   id                    String    @id @default(uuid()) @db.Uuid
   tenantId              String    @db.Uuid
@@ -119,6 +143,7 @@ model WhatsAppPhoneNumber {
   messages               Message[]
 
   @@index([tenantId, active, isDefault])
+  @@index([wabaId, tenantId])
 }
 
 model Contact {
