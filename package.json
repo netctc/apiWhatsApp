@@ -12,6 +12,7 @@
     "start:prod": "node dist/main.js",
     "start:worker:dev": "nest start --entryFile worker --watch",
     "start:worker": "node dist/worker.js",
+    "tenant:bootstrap": "npm run prisma:generate && npm run build && node dist/cli/bootstrap-tenant.js",
     "lint": "eslint \"{src,test}/**/*.ts\" --max-warnings=0",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand",
