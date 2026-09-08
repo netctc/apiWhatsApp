@@ -37,6 +37,8 @@ export class WebhookStatusService {
       data: {
         processed: true,
         processedAt: new Date(),
+        processingLeaseUntil: null,
+        lastError: null,
       },
     });
   }
