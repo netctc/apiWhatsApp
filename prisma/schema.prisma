@@ -7,6 +7,11 @@ datasource db {
   provider = "postgresql"
 }
 
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
 enum MessageDirection {
   INBOUND
   OUTBOUND
@@ -37,6 +42,34 @@ enum MessageType {
   CONTACT
 }
 
+model Tenant {
+  id        String       @id @default(uuid()) @db.Uuid
+  name      String       @db.VarChar(160)
+  slug      String       @unique @db.VarChar(80)
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  apiKeys   ApiKey[]
+  messages  Message[]
+}
+
+model ApiKey {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @db.Uuid
+  name       String   @db.VarChar(120)
+  keyPrefix  String   @unique @db.VarChar(24)
+  keyHash    String   @unique @db.Char(64)
+  scopes     String[] @default([])
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, revokedAt, expiresAt])
+}
+
 model Message {
   id                   String           @id @default(uuid()) @db.Uuid
   tenantId             String?          @db.Uuid
@@ -46,7 +79,7 @@ model Message {
   to                   String?
   from                 String?
   providerMessageId    String?          @unique
-  idempotencyKey       String?          @unique
+  idempotencyKey       String?
   payload              Json
   providerResponse     Json?
   errorCode            String?
@@ -61,8 +94,10 @@ model Message {
   deliveredAt          DateTime?
   readAt               DateTime?
   failedAt             DateTime?
+  tenant               Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   statusEvents         MessageStatusEvent[]
 
+  @@unique([tenantId, idempotencyKey])
   @@index([tenantId, createdAt])
   @@index([status, processingLeaseUntil, createdAt])
   @@index([to, createdAt])
