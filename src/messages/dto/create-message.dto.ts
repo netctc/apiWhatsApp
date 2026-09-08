@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsEnum, IsObject, IsOptional, IsString } from "class-validator";
+import { IsEnum, IsObject, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
 
 export enum OutboundMessageType {
   TEXT = "TEXT",
@@ -19,8 +19,13 @@ export class CreateMessageDto {
   @IsObject()
   payload!: Record<string, unknown>;
 
-  @ApiPropertyOptional({ description: "Client-supplied idempotency key" })
+  @ApiPropertyOptional({
+    description: "Deprecated body fallback. Prefer the Idempotency-Key HTTP header.",
+    deprecated: true,
+  })
   @IsOptional()
   @IsString()
+  @MinLength(1)
+  @MaxLength(255)
   idempotencyKey?: string;
 }
