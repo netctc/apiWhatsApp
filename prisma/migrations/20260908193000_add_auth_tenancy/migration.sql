@@ -20,7 +20,7 @@ CREATE TABLE "ApiKey" (
     "name" VARCHAR(120) NOT NULL,
     "keyPrefix" VARCHAR(24) NOT NULL,
     "keyHash" CHAR(64) NOT NULL,
-    "scopes" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "scopes" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     "lastUsedAt" TIMESTAMP(3),
     "expiresAt" TIMESTAMP(3),
     "revokedAt" TIMESTAMP(3),
