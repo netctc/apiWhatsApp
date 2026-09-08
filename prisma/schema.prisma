@@ -45,15 +45,18 @@ model Message {
   status            MessageStatus    @default(CREATED)
   to                 String?
   from               String?
-  providerMessageId String?           @unique
-  idempotencyKey    String?           @unique
+  providerMessageId String?          @unique
+  idempotencyKey    String?          @unique
   payload            Json
   providerResponse   Json?
   errorCode          String?
   errorMessage       String?
+  attemptCount       Int              @default(0)
+  lastAttemptAt      DateTime?
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
   submittedAt        DateTime?
+  sentAt             DateTime?
   deliveredAt        DateTime?
   readAt             DateTime?
   failedAt           DateTime?
@@ -84,4 +87,21 @@ model WebhookEvent {
   processedAt     DateTime?
 
   @@index([processed, receivedAt])
+}
+
+model OutboxEvent {
+  id            String   @id @default(uuid()) @db.Uuid
+  aggregateType String
+  aggregateId   String   @db.Uuid
+  eventType     String
+  payload       Json
+  attempts      Int      @default(0)
+  nextAttemptAt DateTime @default(now())
+  lastError     String?
+  publishedAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([publishedAt, nextAttemptAt, createdAt])
+  @@index([aggregateType, aggregateId])
 }
