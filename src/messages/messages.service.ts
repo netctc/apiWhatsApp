@@ -1,15 +1,13 @@
 import { ConflictException, Injectable } from "@nestjs/common";
 import { MessageDirection, MessageStatus, MessageType } from "../../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
-import { MessagingQueueService } from "../queue/messaging-queue.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
+
+const OUTBOUND_REQUESTED_EVENT = "message.outbound.requested";
 
 @Injectable()
 export class MessagesService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly queue: MessagingQueueService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async create(dto: CreateMessageDto) {
     if (dto.idempotencyKey) {
@@ -22,20 +20,32 @@ export class MessagesService {
       }
     }
 
-    let message;
     try {
-      message = await this.prisma.message.create({
-        data: {
-          direction: MessageDirection.OUTBOUND,
-          type: this.mapType(dto.type),
-          status: MessageStatus.QUEUED,
-          to: dto.to,
-          idempotencyKey: dto.idempotencyKey,
-          payload: dto.payload,
-          statusEvents: {
-            create: { status: MessageStatus.QUEUED },
+      return await this.prisma.$transaction(async (transaction) => {
+        const message = await transaction.message.create({
+          data: {
+            direction: MessageDirection.OUTBOUND,
+            type: this.mapType(dto.type),
+            status: MessageStatus.QUEUED,
+            to: dto.to,
+            idempotencyKey: dto.idempotencyKey,
+            payload: dto.payload,
+            statusEvents: {
+              create: { status: MessageStatus.QUEUED },
+            },
           },
-        },
+        });
+
+        await transaction.outboxEvent.create({
+          data: {
+            aggregateType: "Message",
+            aggregateId: message.id,
+            eventType: OUTBOUND_REQUESTED_EVENT,
+            payload: { messageId: message.id },
+          },
+        });
+
+        return message;
       });
     } catch (error) {
       if (dto.idempotencyKey) {
@@ -48,9 +58,6 @@ export class MessagesService {
       }
       throw new ConflictException("Unable to create outbound message", { cause: error });
     }
-
-    await this.queue.publishOutboundMessage(message.id);
-    return message;
   }
 
   async findById(id: string) {
