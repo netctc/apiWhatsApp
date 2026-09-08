@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { Message, MessageStatus, Prisma } from "../generated/prisma/client.js";
 import { MetaApiError } from "../meta/meta-api.error.js";
+import { MetaSenderResolverService } from "../meta/meta-sender-resolver.service.js";
 import { MetaWhatsAppClient } from "../meta/meta-whatsapp.client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { OutboundQueueJob, QueueProcessingResult } from "../queue/messaging-queue.service.js";
@@ -23,6 +24,7 @@ export class MessageDispatcherService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly meta: MetaWhatsAppClient,
+    private readonly senderResolver: MetaSenderResolverService,
     private readonly rateLimiter: DistributedRateLimiterService,
   ) {}
 
@@ -58,8 +60,17 @@ export class MessageDispatcherService {
       },
     });
 
+    let sender;
     try {
-      await this.rateLimiter.waitForOutboundSlot();
+      sender = await this.senderResolver.resolve(message.senderId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "WhatsApp sender configuration is unavailable";
+      await this.markFailed(message.id, "SENDER_CONFIGURATION_ERROR", reason);
+      return { action: "dead", reason };
+    }
+
+    try {
+      await this.rateLimiter.waitForOutboundSlot(sender.phoneNumberId, sender.rateLimitPerSecond);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Rate limiter unavailable";
       await this.markRetryableFailure(message.id, "RATE_LIMITER_UNAVAILABLE", reason, job.attempt);
@@ -67,7 +78,7 @@ export class MessageDispatcherService {
     }
 
     try {
-      const result = await this.meta.sendMessage(message);
+      const result = await this.meta.sendMessage(message, sender);
       await this.prisma.message.update({
         where: { id: message.id },
         data: {
