@@ -1,10 +1,9 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { ApiScope } from "../auth/auth.constants.js";
+import type { AuditRequestContext } from "../audit/audit.types.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { generateApiKey, hashApiKey } from "../auth/api-key.util.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
-import type { AuditRequestContext } from "../audit/audit.types.js";
 import { CreateApiKeyDto } from "./dto/create-api-key.dto.js";
 
 @Injectable()
