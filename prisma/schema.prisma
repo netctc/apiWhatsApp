@@ -38,32 +38,33 @@ enum MessageType {
 }
 
 model Message {
-  id                String           @id @default(uuid()) @db.Uuid
-  tenantId          String?          @db.Uuid
-  direction         MessageDirection
-  type              MessageType
-  status            MessageStatus    @default(CREATED)
-  to                 String?
-  from               String?
-  providerMessageId String?          @unique
-  idempotencyKey    String?          @unique
-  payload            Json
-  providerResponse   Json?
-  errorCode          String?
-  errorMessage       String?
-  attemptCount       Int             @default(0)
-  lastAttemptAt      DateTime?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
-  submittedAt        DateTime?
-  sentAt             DateTime?
-  deliveredAt        DateTime?
-  readAt             DateTime?
-  failedAt           DateTime?
-  statusEvents       MessageStatusEvent[]
+  id                   String           @id @default(uuid()) @db.Uuid
+  tenantId             String?          @db.Uuid
+  direction            MessageDirection
+  type                 MessageType
+  status               MessageStatus    @default(CREATED)
+  to                   String?
+  from                 String?
+  providerMessageId    String?          @unique
+  idempotencyKey       String?          @unique
+  payload              Json
+  providerResponse     Json?
+  errorCode            String?
+  errorMessage         String?
+  attemptCount         Int              @default(0)
+  lastAttemptAt        DateTime?
+  processingLeaseUntil DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  submittedAt          DateTime?
+  sentAt               DateTime?
+  deliveredAt          DateTime?
+  readAt               DateTime?
+  failedAt             DateTime?
+  statusEvents         MessageStatusEvent[]
 
   @@index([tenantId, createdAt])
-  @@index([status, createdAt])
+  @@index([status, processingLeaseUntil, createdAt])
   @@index([to, createdAt])
 }
 
@@ -79,29 +80,34 @@ model MessageStatusEvent {
 }
 
 model WebhookEvent {
-  id              String   @id @default(uuid()) @db.Uuid
-  providerEventId String?  @unique
-  payload         Json
-  processed       Boolean  @default(false)
-  receivedAt      DateTime @default(now())
-  processedAt     DateTime?
+  id                   String   @id @default(uuid()) @db.Uuid
+  providerEventId      String?  @unique
+  payload              Json
+  processed            Boolean  @default(false)
+  attemptCount         Int      @default(0)
+  nextAttemptAt        DateTime @default(now())
+  processingLeaseUntil DateTime?
+  lastError            String?
+  receivedAt           DateTime @default(now())
+  processedAt          DateTime?
 
-  @@index([processed, receivedAt])
+  @@index([processed, nextAttemptAt, processingLeaseUntil, receivedAt])
 }
 
 model OutboxEvent {
-  id            String   @id @default(uuid()) @db.Uuid
-  aggregateType String
-  aggregateId   String   @db.Uuid
-  eventType     String
-  payload       Json
-  attempts      Int      @default(0)
-  nextAttemptAt DateTime @default(now())
-  lastError     String?
-  publishedAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                   String   @id @default(uuid()) @db.Uuid
+  aggregateType        String
+  aggregateId          String   @db.Uuid
+  eventType            String
+  payload              Json
+  attempts             Int      @default(0)
+  nextAttemptAt        DateTime @default(now())
+  processingLeaseUntil DateTime?
+  lastError            String?
+  publishedAt          DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
-  @@index([publishedAt, nextAttemptAt, createdAt])
+  @@index([publishedAt, nextAttemptAt, processingLeaseUntil, createdAt])
   @@index([aggregateType, aggregateId])
 }
