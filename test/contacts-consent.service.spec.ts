@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import { ConsentStatus } from "../src/generated/prisma/client.js";
 import { ContactsService } from "../src/contacts/contacts.service.js";
 import { ConsentDecision } from "../src/contacts/dto/record-consent.dto.js";
