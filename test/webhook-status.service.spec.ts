@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import { MessageStatus } from "../src/generated/prisma/client.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
 import { WebhookStatusService } from "../src/webhooks/webhook-status.service.js";
