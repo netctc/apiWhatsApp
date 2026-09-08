@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { MessageStatus, Prisma } from "../../generated/prisma/client.js";
+import { MessageStatus, Prisma } from "../generated/prisma/client.js";
 import { MetaApiError } from "../meta/meta-api.error.js";
 import { MetaWhatsAppClient } from "../meta/meta-whatsapp.client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
