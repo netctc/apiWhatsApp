@@ -16,6 +16,10 @@ const TERMINAL_OR_SUBMITTED_STATUSES = new Set<MessageStatus>([
   MessageStatus.EXPIRED,
 ]);
 
+type ClaimedMessage = Message & {
+  channel: { providerPhoneNumberId: string } | null;
+};
+
 @Injectable()
 export class MessageDispatcherService {
   private readonly logger = new Logger(MessageDispatcherService.name);
@@ -58,8 +62,10 @@ export class MessageDispatcherService {
       },
     });
 
+    const providerPhoneNumberId = message.channel?.providerPhoneNumberId;
+
     try {
-      await this.rateLimiter.waitForOutboundSlot();
+      await this.rateLimiter.waitForOutboundSlot(providerPhoneNumberId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Rate limiter unavailable";
       await this.markRetryableFailure(message.id, "RATE_LIMITER_UNAVAILABLE", reason, job.attempt);
@@ -67,7 +73,7 @@ export class MessageDispatcherService {
     }
 
     try {
-      const result = await this.meta.sendMessage(message);
+      const result = await this.meta.sendMessage(message, providerPhoneNumberId);
       await this.prisma.message.update({
         where: { id: message.id },
         data: {
@@ -127,7 +133,7 @@ export class MessageDispatcherService {
     );
   }
 
-  private async claimMessage(messageId: string): Promise<{ claimed: boolean; message: Message | null }> {
+  private async claimMessage(messageId: string): Promise<{ claimed: boolean; message: ClaimedMessage | null }> {
     const now = new Date();
     const leaseMs = Math.max(5000, Number(process.env.OUTBOUND_MESSAGE_LEASE_MS ?? 30000));
     const leaseUntil = new Date(now.getTime() + leaseMs);
@@ -158,7 +164,14 @@ export class MessageDispatcherService {
       },
     });
 
-    const message = await this.prisma.message.findUnique({ where: { id: messageId } });
+    const message = await this.prisma.message.findUnique({
+      where: { id: messageId },
+      include: {
+        channel: {
+          select: { providerPhoneNumberId: true },
+        },
+      },
+    });
     return { claimed: result.count === 1, message };
   }
 
