@@ -1,3 +1,4 @@
+import { normalizeWhatsAppPhoneNumber } from "../common/phone-number.util.js";
 import { MessageType } from "../generated/prisma/client.js";
 
 interface OutboundMessageRecord {
@@ -94,12 +95,11 @@ function normalizeRecipient(value: string | null): string {
     throw new Error("Outbound message recipient is required");
   }
 
-  const normalized = value.replace(/\D/g, "");
-  if (normalized.length < 8 || normalized.length > 15) {
+  try {
+    return normalizeWhatsAppPhoneNumber(value);
+  } catch {
     throw new Error("Outbound message recipient must be a valid international phone number");
   }
-
-  return normalized;
 }
 
 function asObject(value: unknown): Record<string, unknown> {
