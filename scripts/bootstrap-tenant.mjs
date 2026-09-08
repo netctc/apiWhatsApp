@@ -45,7 +45,14 @@ try {
         name: keyName,
         prefix: keyPrefix,
         keyHash,
-        scopes: ["messages:read", "messages:write", "contacts:read", "contacts:write"],
+        scopes: [
+          "messages:read",
+          "messages:write",
+          "contacts:read",
+          "contacts:write",
+          "phone_numbers:read",
+          "phone_numbers:write",
+        ],
       },
     });
 

@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsEnum, IsObject, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
+import { IsEnum, IsObject, IsOptional, IsString, IsUUID, MaxLength, MinLength } from "class-validator";
 
 export enum OutboundMessageType {
   TEXT = "TEXT",
@@ -14,6 +14,13 @@ export class CreateMessageDto {
   @ApiProperty({ enum: OutboundMessageType })
   @IsEnum(OutboundMessageType)
   type!: OutboundMessageType;
+
+  @ApiPropertyOptional({
+    description: "Internal tenant-scoped WhatsApp sender ID. When omitted, the active default sender is used.",
+  })
+  @IsOptional()
+  @IsUUID()
+  senderId?: string;
 
   @ApiProperty({ description: "Provider-neutral message payload" })
   @IsObject()

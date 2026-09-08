@@ -12,12 +12,34 @@ describe("OutboundPolicyService", () => {
     findByPhone.mockReset();
   });
 
-  it("blocks all new outbound messages for opted-out contacts", async () => {
-    findByPhone.mockResolvedValue({ consentStatus: ConsentStatus.OPTED_OUT });
+  it("blocks free-form traffic when no customer service window exists", async () => {
+    findByPhone.mockResolvedValue(null);
 
     await expect(
       service.assertAllowed("tenant-1", "+96170123456", OutboundMessageType.TEXT),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it("blocks free-form traffic after the 24-hour customer service window expires", async () => {
+    findByPhone.mockResolvedValue({
+      consentStatus: ConsentStatus.OPTED_IN,
+      serviceWindowExpiresAt: new Date(Date.now() - 1000),
+    });
+
+    await expect(
+      service.assertAllowed("tenant-1", "+96170123456", OutboundMessageType.TEXT),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it("allows a service reply inside an open customer service window", async () => {
+    findByPhone.mockResolvedValue({
+      consentStatus: ConsentStatus.OPTED_OUT,
+      serviceWindowExpiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await expect(
+      service.assertAllowed("tenant-1", "+96170123456", OutboundMessageType.TEXT),
+    ).resolves.toBeUndefined();
   });
 
   it("requires explicit opt-in for template messages", async () => {
@@ -33,14 +55,6 @@ describe("OutboundPolicyService", () => {
 
     await expect(
       service.assertAllowed("tenant-1", "+96170123456", OutboundMessageType.TEMPLATE),
-    ).resolves.toBeUndefined();
-  });
-
-  it("allows non-template traffic when the contact is not opted out", async () => {
-    findByPhone.mockResolvedValue(null);
-
-    await expect(
-      service.assertAllowed("tenant-1", "+96170123456", OutboundMessageType.TEXT),
     ).resolves.toBeUndefined();
   });
 });

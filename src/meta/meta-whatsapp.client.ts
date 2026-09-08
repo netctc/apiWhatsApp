@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { MetaApiError } from "./meta-api.error.js";
 import { mapMessageToMetaPayload } from "./meta-message.mapper.js";
+import type { MetaSenderContext } from "./meta-sender-resolver.service.js";
 
 interface OutboundMessageRecord {
   type: Parameters<typeof mapMessageToMetaPayload>[0]["type"];
@@ -18,10 +19,8 @@ export interface MetaSendMessageResult {
 export class MetaWhatsAppClient {
   constructor(private readonly config: ConfigService) {}
 
-  async sendMessage(message: OutboundMessageRecord): Promise<MetaSendMessageResult> {
+  async sendMessage(message: OutboundMessageRecord, sender: MetaSenderContext): Promise<MetaSendMessageResult> {
     const graphVersion = this.required("META_GRAPH_API_VERSION");
-    const phoneNumberId = this.required("META_WHATSAPP_PHONE_NUMBER_ID");
-    const accessToken = this.required("META_WHATSAPP_ACCESS_TOKEN");
     const timeoutMs = Number(this.config.get("META_HTTP_TIMEOUT_MS") ?? 15000);
 
     if (!/^v\d+\.\d+$/.test(graphVersion)) {
@@ -29,16 +28,16 @@ export class MetaWhatsAppClient {
     }
 
     const requestBody = mapMessageToMetaPayload(message);
-    const url = `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`;
+    const url = `https://graph.facebook.com/${graphVersion}/${sender.phoneNumberId}/messages`;
 
     let response: Response;
     try {
       response = await fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${accessToken}`,
+          Authorization: `Bearer ${sender.accessToken}`,
           "Content-Type": "application/json",
-          "User-Agent": "apiWhatsApp/0.1",
+          "User-Agent": "apiWhatsApp/0.3",
         },
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(timeoutMs),

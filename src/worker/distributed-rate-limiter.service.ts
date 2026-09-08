@@ -20,9 +20,9 @@ export class DistributedRateLimiterService implements OnModuleDestroy {
     });
   }
 
-  async waitForOutboundSlot(): Promise<void> {
-    const limit = Math.max(1, Number(this.config.get("DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND") ?? 75));
-    const phoneNumberId = this.config.get<string>("META_WHATSAPP_PHONE_NUMBER_ID") ?? "default";
+  async waitForOutboundSlot(phoneNumberId: string, configuredLimit?: number): Promise<void> {
+    const defaultLimit = Number(this.config.get("DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND") ?? 75);
+    const limit = Math.max(1, configuredLimit ?? defaultLimit);
 
     for (;;) {
       await this.ensureConnected();
