@@ -1,18 +1,54 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import {
   CampaignRecipientStatus,
+  CampaignStatus,
   MessageStatus,
   Prisma,
 } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
-interface MessageMilestoneRow {
+export interface CampaignMessageMilestones {
   created: number;
   submitted: number;
   sent: number;
   delivered: number;
   read: number;
   failed: number;
+}
+
+export interface CampaignAnalyticsResponse {
+  campaign: {
+    id: string;
+    name: string;
+    status: CampaignStatus;
+    totalRecipients: number;
+    snapshotAt: Date | null;
+    startedAt: Date | null;
+    completedAt: Date | null;
+    cancelledAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  orchestration: {
+    snapshotRecipients: number;
+    byStatus: Record<CampaignRecipientStatus, number>;
+    terminalRecipients: number;
+  };
+  messages: {
+    milestones: CampaignMessageMilestones;
+    currentStatus: Record<MessageStatus, number>;
+  };
+  rates: {
+    messageCreationRate: number | null;
+    submissionRate: number | null;
+    deliveryRate: number | null;
+    readRate: number | null;
+    failureRate: number | null;
+  };
+  consistency: {
+    snapshotMatchesStoredTotal: boolean;
+  };
+  generatedAt: Date;
 }
 
 interface CurrentMessageStatusRow {
@@ -24,7 +60,7 @@ interface CurrentMessageStatusRow {
 export class CampaignAnalyticsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async get(tenantId: string, campaignId: string) {
+  async get(tenantId: string, campaignId: string): Promise<CampaignAnalyticsResponse> {
     const campaign = await this.prisma.campaign.findFirst({
       where: { id: campaignId, tenantId },
       select: {
@@ -50,7 +86,7 @@ export class CampaignAnalyticsService {
         where: { campaignId },
         _count: { _all: true },
       }),
-      this.prisma.$queryRaw<MessageMilestoneRow[]>(Prisma.sql`
+      this.prisma.$queryRaw<CampaignMessageMilestones[]>(Prisma.sql`
         SELECT
           COUNT(r."messageId")::int AS "created",
           COUNT(*) FILTER (WHERE m."submittedAt" IS NOT NULL)::int AS "submitted",
