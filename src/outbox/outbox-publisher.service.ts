@@ -1,5 +1,15 @@
-import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+  Optional,
+} from "@nestjs/common";
 import { MessageTrafficClass, OutboxEvent, Prisma } from "../generated/prisma/client.js";
+import {
+  TraceContextService,
+  type TraceCarrier,
+} from "../observability/trace-context.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { MessagingQueueService } from "../queue/messaging-queue.service.js";
 
@@ -14,6 +24,7 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
   constructor(
     private readonly prisma: PrismaService,
     private readonly queue: MessagingQueueService,
+    @Optional() private readonly traceContext?: TraceContextService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -95,7 +106,11 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
         );
       }
 
-      await this.queue.publishOutboundMessage(messageId, persistedTrafficClass);
+      await this.queue.publishOutboundMessage(
+        messageId,
+        persistedTrafficClass,
+        this.extractTrace(payload),
+      );
 
       await this.prisma.outboxEvent.update({
         where: { id: eventId },
@@ -144,6 +159,13 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
       default:
         return undefined;
     }
+  }
+
+  private extractTrace(payload: unknown): TraceCarrier | undefined {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return undefined;
+    }
+    return this.traceContext?.parseCarrier((payload as { trace?: unknown }).trace);
   }
 
   private async lookupTrafficClass(messageId: string): Promise<MessageTrafficClass> {
