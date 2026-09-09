@@ -55,6 +55,7 @@ function loadedRecipient(
       senderId: SENDER_ID,
       status: campaignStatus,
       failureReason: null,
+      audience: { allOptedIn: true },
       components: [],
       sender: {
         id: SENDER_ID,
@@ -184,8 +185,9 @@ describe("CampaignProcessorService", () => {
     );
   });
 
-  it("renders contact and metadata tokens before creating the message", async () => {
+  it("renders contact and metadata tokens before creating the message when explicitly enabled", async () => {
     const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
+    recipient.campaign.audience = { allOptedIn: true, personalizationEnabled: true };
     recipient.campaign.components = [
       {
         type: "body",
@@ -225,8 +227,40 @@ describe("CampaignProcessorService", () => {
     );
   });
 
-  it("skips only the recipient when a personalization value is missing", async () => {
+  it("preserves token-like component strings when personalization is not enabled", async () => {
     const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
+    recipient.campaign.components = [
+      {
+        type: "body",
+        parameters: [{ type: "text", text: "{{contact.name}}" }],
+      },
+    ];
+    recipientFindUnique.mockResolvedValue(recipient);
+    messageCreate.mockResolvedValue({ id: MESSAGE_ID });
+    const internal = service as unknown as {
+      processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
+    };
+
+    await internal.processRecipient(claim());
+
+    expect(messageCreate).toHaveBeenCalledWith(
+      TENANT_ID,
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          components: [
+            {
+              type: "body",
+              parameters: [{ type: "text", text: "{{contact.name}}" }],
+            },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it("skips only the recipient when an enabled personalization value is missing", async () => {
+    const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
+    recipient.campaign.audience = { allOptedIn: true, personalizationEnabled: true };
     recipient.contact.metadata = {};
     recipient.campaign.components = [
       {
