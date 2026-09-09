@@ -53,6 +53,9 @@ CREATE TABLE "CampaignRecipient" (
 CREATE INDEX "Campaign_tenantId_status_scheduledAt_createdAt_idx" ON "Campaign"("tenantId", "status", "scheduledAt", "createdAt");
 
 -- CreateIndex
+CREATE INDEX "Campaign_status_scheduledAt_idx" ON "Campaign"("status", "scheduledAt");
+
+-- CreateIndex
 CREATE INDEX "Campaign_tenantId_createdAt_idx" ON "Campaign"("tenantId", "createdAt");
 
 -- CreateIndex
