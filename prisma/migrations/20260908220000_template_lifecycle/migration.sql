@@ -3,7 +3,7 @@ CREATE TABLE "MessageTemplate" (
     "id" UUID NOT NULL,
     "tenantId" UUID NOT NULL,
     "wabaId" TEXT NOT NULL,
-    "providerTemplateId" TEXT,
+    "providerTemplateId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "language" TEXT NOT NULL,
     "category" TEXT,
@@ -26,10 +26,13 @@ CREATE UNIQUE INDEX "MessageTemplate_providerTemplateId_key" ON "MessageTemplate
 CREATE UNIQUE INDEX "MessageTemplate_tenantId_wabaId_name_language_key" ON "MessageTemplate"("tenantId", "wabaId", "name", "language");
 
 -- CreateIndex
-CREATE INDEX "MessageTemplate_tenantId_status_category_idx" ON "MessageTemplate"("tenantId", "status", "category");
+CREATE INDEX "MessageTemplate_tenantId_wabaId_status_name_idx" ON "MessageTemplate"("tenantId", "wabaId", "status", "name");
 
 -- CreateIndex
-CREATE INDEX "MessageTemplate_tenantId_wabaId_updatedAt_idx" ON "MessageTemplate"("tenantId", "wabaId", "updatedAt");
+CREATE INDEX "MessageTemplate_tenantId_updatedAt_idx" ON "MessageTemplate"("tenantId", "updatedAt");
+
+-- CreateIndex
+CREATE INDEX "WhatsAppPhoneNumber_tenantId_wabaId_active_idx" ON "WhatsAppPhoneNumber"("tenantId", "wabaId", "active");
 
 -- CreateIndex
 CREATE INDEX "WhatsAppPhoneNumber_wabaId_tenantId_idx" ON "WhatsAppPhoneNumber"("wabaId", "tenantId");
