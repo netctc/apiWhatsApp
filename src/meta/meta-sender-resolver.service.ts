@@ -9,6 +9,12 @@ export interface MetaSenderContext {
   rateLimitPerSecond?: number;
 }
 
+export interface MetaWabaContext {
+  internalSenderId: string;
+  wabaId: string;
+  accessToken: string;
+}
+
 @Injectable()
 export class MetaSenderResolverService {
   constructor(
@@ -30,6 +36,15 @@ export class MetaSenderResolverService {
       phoneNumberId: sender.providerPhoneNumberId,
       accessToken: this.resolveCredentialRef(sender.credentialRef),
       rateLimitPerSecond: sender.rateLimitPerSecond ?? undefined,
+    };
+  }
+
+  async resolveWaba(tenantId: string, senderId?: string): Promise<MetaWabaContext> {
+    const { sender, wabaId } = await this.phoneNumbers.resolveWabaForTenant(tenantId, senderId);
+    return {
+      internalSenderId: sender.id,
+      wabaId,
+      accessToken: this.resolveCredentialRef(sender.credentialRef),
     };
   }
 
