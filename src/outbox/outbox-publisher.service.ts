@@ -87,9 +87,15 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
       }
 
       const messageId = this.extractMessageId(payload) ?? aggregateId;
-      const trafficClass =
-        this.extractTrafficClass(payload) ?? (await this.lookupTrafficClass(messageId));
-      await this.queue.publishOutboundMessage(messageId, trafficClass);
+      const persistedTrafficClass = await this.lookupTrafficClass(messageId);
+      const payloadTrafficClass = this.extractTrafficClass(payload);
+      if (payloadTrafficClass && payloadTrafficClass !== persistedTrafficClass) {
+        throw new Error(
+          `Outbox traffic class ${payloadTrafficClass} does not match persisted message class ${persistedTrafficClass}`,
+        );
+      }
+
+      await this.queue.publishOutboundMessage(messageId, persistedTrafficClass);
 
       await this.prisma.outboxEvent.update({
         where: { id: eventId },
@@ -145,6 +151,9 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
       where: { id: messageId },
       select: { trafficClass: true },
     });
-    return message?.trafficClass ?? MessageTrafficClass.TRANSACTIONAL;
+    if (!message) {
+      throw new Error(`Outbound message ${messageId} no longer exists`);
+    }
+    return message.trafficClass;
   }
 }
