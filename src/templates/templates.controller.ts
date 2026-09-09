@@ -1,5 +1,7 @@
-import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Query, Req } from "@nestjs/common";
 import { ApiOperation, ApiSecurity, ApiTags } from "@nestjs/swagger";
+import type { Request } from "express";
+import { auditRequestContext } from "../audit/audit-request.util.js";
 import { ApiScope } from "../auth/auth.constants.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
@@ -17,8 +19,12 @@ export class TemplatesController {
   @Post("sync")
   @RequireScopes(ApiScope.TEMPLATES_WRITE)
   @ApiOperation({ summary: "Synchronize message templates from the WABA behind a tenant sender" })
-  sync(@CurrentPrincipal() principal: ApiPrincipal, @Body() dto: SyncTemplatesDto) {
-    return this.templates.sync(principal.tenantId, dto);
+  sync(
+    @CurrentPrincipal() principal: ApiPrincipal,
+    @Body() dto: SyncTemplatesDto,
+    @Req() request: Request,
+  ) {
+    return this.templates.sync(principal, dto, auditRequestContext(request));
   }
 
   @Get()
