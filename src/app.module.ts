@@ -10,6 +10,7 @@ import { OutboxModule } from "./outbox/outbox.module.js";
 import { PhoneNumbersModule } from "./phone-numbers/phone-numbers.module.js";
 import { PrismaModule } from "./prisma/prisma.module.js";
 import { QueueModule } from "./queue/queue.module.js";
+import { TemplatesModule } from "./templates/templates.module.js";
 import { WebhooksModule } from "./webhooks/webhooks.module.js";
 
 @Module({
@@ -21,6 +22,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module.js";
     AuditModule,
     ContactsModule,
     PhoneNumbersModule,
+    TemplatesModule,
     QueueModule,
     OutboxModule,
     HealthModule,
