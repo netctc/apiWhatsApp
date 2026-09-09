@@ -6,7 +6,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run prisma:generate && npm run build
+RUN DATABASE_URL=postgresql://build:build@localhost:5432/build?schema=public npm run prisma:generate && npm run build
 
 FROM node:24-alpine AS runtime
 
