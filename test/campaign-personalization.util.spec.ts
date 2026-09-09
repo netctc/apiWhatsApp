@@ -1,11 +1,19 @@
 import {
   CampaignPersonalizationTemplateError,
   CampaignPersonalizationValueError,
+  isCampaignPersonalizationEnabled,
   renderCampaignComponents,
   validateCampaignComponents,
 } from "../src/campaigns/campaign-personalization.util.js";
 
 describe("campaign personalization", () => {
+  it("requires explicit persisted opt-in before personalization is considered enabled", () => {
+    expect(isCampaignPersonalizationEnabled(undefined)).toBe(false);
+    expect(isCampaignPersonalizationEnabled({ allOptedIn: true })).toBe(false);
+    expect(isCampaignPersonalizationEnabled({ personalizationEnabled: false })).toBe(false);
+    expect(isCampaignPersonalizationEnabled({ personalizationEnabled: true })).toBe(true);
+  });
+
   it("renders allowlisted contact fields and top-level scalar metadata", () => {
     const components = [
       {
