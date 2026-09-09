@@ -7,6 +7,7 @@ import { CampaignsModule } from "./campaigns/campaigns.module.js";
 import { ContactsModule } from "./contacts/contacts.module.js";
 import { HealthModule } from "./health/health.module.js";
 import { MessagesModule } from "./messages/messages.module.js";
+import { OperationsModule } from "./operations/operations.module.js";
 import { OutboxModule } from "./outbox/outbox.module.js";
 import { PhoneNumbersModule } from "./phone-numbers/phone-numbers.module.js";
 import { PrismaModule } from "./prisma/prisma.module.js";
@@ -30,6 +31,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module.js";
     QueueModule,
     OutboxModule,
     HealthModule,
+    OperationsModule,
     MessagesModule,
     WebhooksModule,
   ],
