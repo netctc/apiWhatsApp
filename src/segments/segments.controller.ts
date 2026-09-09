@@ -1,5 +1,7 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Req } from "@nestjs/common";
 import { ApiOperation, ApiSecurity, ApiTags } from "@nestjs/swagger";
+import type { Request } from "express";
+import { auditRequestContext } from "../audit/audit-request.util.js";
 import { ApiScope } from "../auth/auth.constants.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
@@ -19,8 +21,12 @@ export class SegmentsController {
   @Post()
   @RequireScopes(ApiScope.SEGMENTS_WRITE)
   @ApiOperation({ summary: "Create a reusable tenant contact segment" })
-  create(@CurrentPrincipal() principal: ApiPrincipal, @Body() dto: CreateSegmentDto) {
-    return this.segments.create(principal.tenantId, dto);
+  create(
+    @CurrentPrincipal() principal: ApiPrincipal,
+    @Body() dto: CreateSegmentDto,
+    @Req() request: Request,
+  ) {
+    return this.segments.create(principal, dto, auditRequestContext(request));
   }
 
   @Get()
@@ -57,7 +63,8 @@ export class SegmentsController {
     @CurrentPrincipal() principal: ApiPrincipal,
     @Param("id", segmentIdPipe) id: string,
     @Body() dto: UpdateSegmentDto,
+    @Req() request: Request,
   ) {
-    return this.segments.update(principal.tenantId, id, dto);
+    return this.segments.update(principal, id, dto, auditRequestContext(request));
   }
 }

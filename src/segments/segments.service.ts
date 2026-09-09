@@ -5,6 +5,9 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from "@nestjs/common";
+import type { AuditRequestContext } from "../audit/audit.types.js";
+import { auditLogData, changedFields, mutationActor } from "../audit/audit-write.util.js";
+import type { ApiPrincipal } from "../auth/auth.types.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { CreateSegmentDto } from "./dto/create-segment.dto.js";
@@ -20,18 +23,44 @@ import {
 export class SegmentsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(tenantId: string, dto: CreateSegmentDto) {
+  async create(
+    tenantOrPrincipal: string | ApiPrincipal,
+    dto: CreateSegmentDto,
+    auditContext?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(tenantOrPrincipal);
+    const tenantId = actor.tenantId;
     const name = this.normalizeName(dto.name);
     await this.assertNameAvailable(tenantId, name);
     const definition = this.normalizeDefinition(dto.definition);
 
-    return this.prisma.contactSegment.create({
-      data: {
-        tenantId,
-        name,
-        description: dto.description?.trim() || undefined,
-        definition: this.toJson(definition),
-      },
+    return this.prisma.$transaction(async (transaction) => {
+      const created = await transaction.contactSegment.create({
+        data: {
+          tenantId,
+          name,
+          description: dto.description?.trim() || undefined,
+          definition: this.toJson(definition),
+        },
+      });
+
+      const audit = auditLogData(
+        actor,
+        auditContext,
+        "contact_segment.created",
+        "ContactSegment",
+        created.id,
+        {
+          name: created.name,
+          active: created.active,
+          criteria: this.definitionSummary(definition),
+        },
+      );
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+
+      return created;
     });
   }
 
@@ -53,7 +82,14 @@ export class SegmentsService {
     return segment;
   }
 
-  async update(tenantId: string, id: string, dto: UpdateSegmentDto) {
+  async update(
+    tenantOrPrincipal: string | ApiPrincipal,
+    id: string,
+    dto: UpdateSegmentDto,
+    auditContext?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(tenantOrPrincipal);
+    const tenantId = actor.tenantId;
     const existing = await this.findById(tenantId, id);
     const name = dto.name === undefined ? existing.name : this.normalizeName(dto.name);
     if (name !== existing.name) {
@@ -61,20 +97,41 @@ export class SegmentsService {
     }
 
     const definition =
-      dto.definition === undefined
-        ? undefined
-        : this.normalizeDefinition(dto.definition);
+      dto.definition === undefined ? undefined : this.normalizeDefinition(dto.definition);
 
-    return this.prisma.contactSegment.update({
-      where: { id },
-      data: {
-        name,
-        ...(dto.description !== undefined
-          ? { description: dto.description.trim() || null }
-          : {}),
-        ...(definition ? { definition: this.toJson(definition) } : {}),
-        ...(dto.active !== undefined ? { active: dto.active } : {}),
-      },
+    return this.prisma.$transaction(async (transaction) => {
+      const updated = await transaction.contactSegment.update({
+        where: { id },
+        data: {
+          name,
+          ...(dto.description !== undefined
+            ? { description: dto.description.trim() || null }
+            : {}),
+          ...(definition ? { definition: this.toJson(definition) } : {}),
+          ...(dto.active !== undefined ? { active: dto.active } : {}),
+        },
+      });
+
+      const effectiveDefinition = definition ?? this.readDefinition(updated.definition);
+      const audit = auditLogData(
+        actor,
+        auditContext,
+        "contact_segment.updated",
+        "ContactSegment",
+        updated.id,
+        {
+          name: updated.name,
+          changedFields: changedFields(dto as Record<string, unknown>),
+          active: updated.active,
+          definitionChanged: dto.definition !== undefined,
+          criteria: this.definitionSummary(effectiveDefinition),
+        },
+      );
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+
+      return updated;
     });
   }
 
@@ -151,6 +208,18 @@ export class SegmentsService {
     if (existing) {
       throw new ConflictException("A contact segment with this name already exists for the tenant");
     }
+  }
+
+  private definitionSummary(definition: {
+    language?: string;
+    tagsAny?: string[];
+    tagsAll?: string[];
+  }) {
+    return {
+      languageConfigured: !!definition.language,
+      tagsAnyCount: definition.tagsAny?.length ?? 0,
+      tagsAllCount: definition.tagsAll?.length ?? 0,
+    };
   }
 
   private toJson(value: unknown): Prisma.InputJsonValue {
