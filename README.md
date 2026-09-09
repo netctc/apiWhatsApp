@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.8.0
+## Current release: 0.9.0
 
 The platform currently provides:
 
@@ -24,6 +24,7 @@ The platform currently provides:
 - Tag-based campaign segmentation
 - Safe opt-in per-recipient template personalization
 - Multi-replica campaign processing with leases and crash recovery
+- Live campaign orchestration and WhatsApp delivery analytics
 - Cursor-paginated message, template, campaign, recipient, and audit APIs
 - OpenAPI / Swagger
 - Docker-based local infrastructure
@@ -55,11 +56,12 @@ flowchart LR
     Webhook --> DB
     DB --> WebhookProcessor[Webhook Processor]
     WebhookProcessor --> DB
+    DB --> Analytics[Live Campaign Analytics]
 ```
 
 HTTP requests do not wait for WhatsApp delivery. Outbound messages and their outbox intents are committed atomically before asynchronous publishing and delivery.
 
-Campaigns do not bypass the normal message path. Every campaign recipient becomes a normal idempotent template message through `MessagesService`, preserving sender ownership, current consent, approved-template validation, MARKETING routing, retry policy, outbox durability, and sender rate limits.
+Campaigns reuse the normal message path. Every campaign recipient becomes an idempotent template message through `MessagesService`, preserving sender ownership, current consent, approved-template validation, MARKETING routing, retries, outbox durability, and sender rate limits.
 
 ## Requirements
 
@@ -155,13 +157,13 @@ GET  /api/v1/templates
 GET  /api/v1/templates/{templateId}
 ```
 
-Templates are synchronized at WABA level. The complete remote catalog must be read successfully before local deletion states are applied. Malformed or incomplete pagination aborts the synchronization.
+Templates are synchronized at WABA level. The complete remote catalog must be read successfully before local deletion states are applied. Malformed or incomplete pagination aborts synchronization.
 
 Meta `message_template_status_update` webhook events update local lifecycle state. New template messages require an exact local `name + language + WABA` match with status `APPROVED`.
 
 ## Traffic classes and priority routing
 
-Clients cannot submit message priority. The server derives it from trusted local metadata:
+Clients cannot submit priority. The server derives it from trusted local metadata:
 
 | Source | Traffic class |
 | --- | --- |
@@ -200,17 +202,18 @@ Contacts support normalized lowercase tags for deterministic segmentation:
 }
 ```
 
-Tags are validated as bounded slug-like values, normalized to lowercase, deduplicated, and stored in a PostgreSQL string array with a GIN index. Campaign tag filtering therefore does not depend on arbitrary JSON predicates.
+Tags are validated as bounded slug-like values, normalized to lowercase, deduplicated, and stored in a PostgreSQL string array with a GIN index.
 
 ## Campaigns
 
-Campaigns are restricted to synchronized templates whose local state is exactly `APPROVED` and category is `MARKETING`. Sender and template must belong to the same WABA.
+Campaigns require a synchronized `APPROVED` `MARKETING` template. Sender and template must belong to the same WABA.
 
 ```text
 POST /api/v1/campaigns
 GET  /api/v1/campaigns
 GET  /api/v1/campaigns/{campaignId}
 GET  /api/v1/campaigns/{campaignId}/recipients
+GET  /api/v1/campaigns/{campaignId}/analytics
 POST /api/v1/campaigns/{campaignId}/launch
 POST /api/v1/campaigns/{campaignId}/pause
 POST /api/v1/campaigns/{campaignId}/resume
@@ -226,54 +229,15 @@ A campaign must choose exactly one base audience:
 
 Optional `language`, `tagsAny`, and `tagsAll` filters only narrow that explicit base audience; they never implicitly expand it to all contacts.
 
-Example:
-
-```json
-{
-  "name": "VIP renewal offer",
-  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d",
-  "templateId": "31ee3b2f-5fbd-44bb-a4aa-b252a3a66c12",
-  "audience": {
-    "allOptedIn": true,
-    "language": "en_US",
-    "tagsAny": ["vip", "renewal:2026"],
-    "tagsAll": ["marketing"]
-  },
-  "components": [],
-  "scheduledAt": "2026-09-10T09:00:00Z"
-}
-```
-
 Launch executes under a campaign row lock and repeatable-read transaction, selecting only currently `OPTED_IN` contacts and creating an immutable `CampaignRecipient` snapshot. `CAMPAIGN_MAX_RECIPIENTS` has an absolute 50,000-recipient safety cap in this release.
 
-Consent is checked again immediately before message creation. A contact that opts out after snapshot creation is marked `SKIPPED` and receives no new message.
+Consent is checked again immediately before message creation. A contact that opts out after the snapshot is marked `SKIPPED` and receives no new message.
 
 ### Safe per-recipient personalization
 
-Personalization is disabled by default for backward compatibility. Enable it explicitly:
+Personalization is disabled by default. Enable it explicitly with `personalizationEnabled=true`.
 
-```json
-{
-  "name": "Personalized VIP offer",
-  "templateId": "31ee3b2f-5fbd-44bb-a4aa-b252a3a66c12",
-  "audience": {
-    "allOptedIn": true,
-    "tagsAll": ["vip"]
-  },
-  "personalizationEnabled": true,
-  "components": [
-    {
-      "type": "body",
-      "parameters": [
-        { "type": "text", "text": "{{contact.name}}" },
-        { "type": "text", "text": "{{contact.metadata.plan}}" }
-      ]
-    }
-  ]
-}
-```
-
-Supported token sources:
+Supported full-value token sources:
 
 ```text
 {{contact.name}}
@@ -283,23 +247,13 @@ Supported token sources:
 {{contact.metadata.<top-level-scalar-key>}}
 ```
 
-Safety rules:
+No JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are evaluated. A token must occupy the complete string value. Missing recipient values mark only that recipient `SKIPPED`.
 
-- a token must occupy the entire string value;
-- no JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are evaluated;
-- metadata access is limited to one top-level bounded key;
-- resolved values must be scalar;
-- component depth, node count, and token count are bounded;
-- invalid token syntax is rejected when the draft is created;
-- a missing recipient value marks only that recipient `SKIPPED`;
-- a corrupt stored personalization template fails the campaign;
-- when `personalizationEnabled` is omitted or false, `components` are passed through unchanged, including token-like strings.
-
-`Campaign.personalizationEnabled` is a dedicated boolean column with database default `false`. Existing campaigns therefore retain static component semantics after migration, and campaign API responses expose the mode directly instead of mixing it into audience configuration.
+`Campaign.personalizationEnabled` is a dedicated boolean column with database default `false`, so campaigns created before personalization retain static component semantics.
 
 ### Processing and crash recovery
 
-Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`, allowing multiple application replicas to process campaigns concurrently without claiming the same recipient.
+Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`, allowing multiple application replicas to process campaigns without claiming the same recipient.
 
 Both due `PENDING` recipients and expired `PROCESSING` leases are reclaimable. Each recipient has one deterministic message key:
 
@@ -307,11 +261,43 @@ Both due `PENDING` recipients and expired `PROCESSING` leases are reclaimable. E
 campaign:<campaignId>:contact:<contactId>
 ```
 
-If a process creates the message and crashes before linking the recipient, a later processor first looks up that existing idempotent message and links it before re-evaluating campaign state, consent, or personalization. This preserves audit truth without creating duplicates.
+If a process creates the message and crashes before linking the recipient, a later processor first looks up that existing message before re-evaluating campaign state, consent, or personalization.
 
-`pause`, `resume`, `cancel`, failure, and completion use conditional state transitions so stale workers cannot overwrite newer lifecycle decisions.
+`COMPLETED` is an orchestration state: all snapshot recipients reached `QUEUED`, `SKIPPED`, `FAILED`, or `CANCELLED`. WhatsApp delivery state remains on each linked `Message`.
 
-`COMPLETED` is a campaign orchestration state: all snapshot recipients reached `QUEUED`, `SKIPPED`, `FAILED`, or `CANCELLED`. WhatsApp delivery state remains on each linked `Message`.
+### Live campaign analytics
+
+```text
+GET /api/v1/campaigns/{campaignId}/analytics
+```
+
+The endpoint requires `campaigns:read` and verifies tenant ownership before running analytics queries.
+
+It reads directly from authoritative `CampaignRecipient` and linked `Message` rows. Webhook processing does not maintain a second set of delivery counters, avoiding counter drift.
+
+The response includes:
+
+- campaign lifecycle metadata;
+- recipient snapshot count and every `CampaignRecipientStatus` count;
+- terminal recipient count;
+- cumulative message milestones: `created`, `submitted`, `sent`, `delivered`, `read`, `failed`;
+- current `MessageStatus` distribution;
+- a snapshot-vs-stored-total consistency signal;
+- `generatedAt` for the read time.
+
+Cumulative milestones use persisted timestamps (`submittedAt`, `sentAt`, `deliveredAt`, `readAt`, `failedAt`). A message currently at `READ`, for example, still contributes to its earlier submitted and delivered milestones.
+
+Rates are percentages on a `0-100` scale:
+
+```text
+messageCreationRate = created / snapshotRecipients
+submissionRate      = submitted / created
+deliveryRate        = delivered / submitted
+readRate            = read / delivered
+failureRate         = failed / created
+```
+
+A rate is `null` when its denominator is zero. Analytics are live reads rather than a long repeatable-read transaction, so a webhook committed between aggregate queries can be reflected in one portion of the response before another. `generatedAt` identifies the observation time and the next read converges on the latest persisted state.
 
 ## Messaging API
 
@@ -406,7 +392,6 @@ Never commit production credentials or tokens.
 
 ## Next implementation slices
 
-- campaign analytics tied to submitted, delivered, read, and failed message outcomes
 - richer saved segments without arbitrary query expressions
 - audit coverage for additional administrative configuration actions
 - provider-backed secret stores beyond environment references
