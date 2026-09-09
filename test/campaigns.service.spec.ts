@@ -124,6 +124,7 @@ describe("CampaignsService", () => {
           tagsAny: ["renewal:2026", "vip"],
           tagsAll: ["marketing"],
         },
+        personalizationEnabled: false,
       }),
       include: expect.any(Object),
     });
@@ -168,12 +169,13 @@ describe("CampaignsService", () => {
       data: expect.objectContaining({
         audience: { allOptedIn: true },
         components,
+        personalizationEnabled: false,
       }),
       include: expect.any(Object),
     });
   });
 
-  it("persists personalization opt-in only when explicitly enabled", async () => {
+  it("persists personalization opt-in on the campaign when explicitly enabled", async () => {
     await service.create(TENANT_ID, {
       name: "Personalized promo",
       templateId: TEMPLATE_ID,
@@ -189,10 +191,8 @@ describe("CampaignsService", () => {
 
     expect(campaignCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        audience: {
-          allOptedIn: true,
-          personalizationEnabled: true,
-        },
+        audience: { allOptedIn: true },
+        personalizationEnabled: true,
       }),
       include: expect.any(Object),
     });
