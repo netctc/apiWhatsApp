@@ -1,5 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsObject, IsOptional, IsString, MaxLength } from "class-validator";
+import {
+  ArrayMaxSize,
+  ArrayUnique,
+  IsArray,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from "class-validator";
 
 export class CreateContactDto {
   @ApiProperty({ example: "+96170123456" })
@@ -23,6 +32,19 @@ export class CreateContactDto {
   @IsString()
   @MaxLength(100)
   timezone?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ["vip", "renewal:2026"],
+    description: "Case-insensitive contact segmentation tags. Stored normalized to lowercase.",
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ArrayUnique()
+  @IsString({ each: true })
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9:_-]{0,63}$/, { each: true })
+  tags?: string[];
 
   @ApiPropertyOptional({ description: "Provider-neutral custom contact metadata" })
   @IsOptional()

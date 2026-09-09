@@ -100,11 +100,16 @@ describe("CampaignsService", () => {
     expect(resolveForTenant).not.toHaveBeenCalled();
   });
 
-  it("normalizes the campaign name and stores the explicit audience definition", async () => {
+  it("normalizes the campaign name and tag segmentation rules", async () => {
     await service.create(TENANT_ID, {
       name: "  September offer  ",
       templateId: TEMPLATE_ID,
-      audience: { allOptedIn: true, language: " en_US " },
+      audience: {
+        allOptedIn: true,
+        language: " en_US ",
+        tagsAny: ["VIP", "renewal:2026", "vip"],
+        tagsAll: ["Marketing"],
+      },
     });
 
     expect(campaignCreate).toHaveBeenCalledWith({
@@ -113,7 +118,81 @@ describe("CampaignsService", () => {
         senderId: SENDER_ID,
         templateId: TEMPLATE_ID,
         name: "September offer",
-        audience: { allOptedIn: true, language: "en_US" },
+        audience: {
+          allOptedIn: true,
+          language: "en_US",
+          tagsAny: ["renewal:2026", "vip"],
+          tagsAll: ["marketing"],
+        },
+        personalizationEnabled: false,
+      }),
+      include: expect.any(Object),
+    });
+  });
+
+  it("rejects unsupported personalization before resolving the sender when personalization is enabled", async () => {
+    await expect(
+      service.create(TENANT_ID, {
+        name: "Promo",
+        templateId: TEMPLATE_ID,
+        audience: { allOptedIn: true },
+        personalizationEnabled: true,
+        components: [
+          {
+            type: "body",
+            parameters: [{ type: "text", text: "Hello {{contact.name}}" }],
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(resolveForTenant).not.toHaveBeenCalled();
+    expect(campaignCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps component strings static when personalization is not enabled", async () => {
+    const components = [
+      {
+        type: "body",
+        parameters: [{ type: "text", text: "Hello {{contact.name}}" }],
+      },
+    ];
+
+    await service.create(TENANT_ID, {
+      name: "Static braces",
+      templateId: TEMPLATE_ID,
+      audience: { allOptedIn: true },
+      components,
+    });
+
+    expect(campaignCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        audience: { allOptedIn: true },
+        components,
+        personalizationEnabled: false,
+      }),
+      include: expect.any(Object),
+    });
+  });
+
+  it("persists personalization opt-in on the campaign when explicitly enabled", async () => {
+    await service.create(TENANT_ID, {
+      name: "Personalized promo",
+      templateId: TEMPLATE_ID,
+      audience: { allOptedIn: true },
+      personalizationEnabled: true,
+      components: [
+        {
+          type: "body",
+          parameters: [{ type: "text", text: "{{contact.name}}" }],
+        },
+      ],
+    });
+
+    expect(campaignCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        audience: { allOptedIn: true },
+        personalizationEnabled: true,
       }),
       include: expect.any(Object),
     });

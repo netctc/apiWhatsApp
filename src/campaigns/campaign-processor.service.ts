@@ -15,6 +15,11 @@ import {
 import { OutboundMessageType } from "../messages/dto/create-message.dto.js";
 import { MessagesService } from "../messages/messages.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import {
+  CampaignPersonalizationTemplateError,
+  CampaignPersonalizationValueError,
+  renderCampaignComponents,
+} from "./campaign-personalization.util.js";
 import { CampaignsService } from "./campaigns.service.js";
 
 @Injectable()
@@ -178,7 +183,11 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
     }
 
     try {
-      const components = Array.isArray(campaign.components) ? campaign.components : undefined;
+      const components = Array.isArray(campaign.components)
+        ? campaign.personalizationEnabled
+          ? this.renderComponents(campaign.components, recipient.contact)
+          : campaign.components
+        : undefined;
       const message = await this.messages.create(campaign.tenantId, {
         to: recipient.contact.phone,
         senderId: campaign.senderId,
@@ -193,6 +202,28 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
 
       await this.completeAsQueued(claim, message.id);
     } catch (error) {
+      if (error instanceof CampaignPersonalizationValueError) {
+        await this.completeClaim(claim, {
+          status: CampaignRecipientStatus.SKIPPED,
+          lastError: error.message.slice(0, 2000),
+        });
+        return;
+      }
+
+      if (error instanceof CampaignPersonalizationTemplateError) {
+        const reason = error.message.slice(0, 2000);
+        const transitioned = await this.campaigns.failCampaign(campaign.id, reason);
+        if (transitioned) {
+          await this.completeClaim(claim, {
+            status: CampaignRecipientStatus.FAILED,
+            lastError: reason,
+          });
+        } else {
+          await this.completeForCurrentCampaignState(claim, campaign.id, reason);
+        }
+        return;
+      }
+
       if (error instanceof ForbiddenException) {
         await this.completeClaim(claim, {
           status: CampaignRecipientStatus.SKIPPED,
@@ -217,6 +248,23 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
 
       await this.retryOrFail(claim, error);
     }
+  }
+
+  private renderComponents(
+    components: unknown[],
+    contact: {
+      name: string | null;
+      phone: string;
+      language: string | null;
+      timezone: string | null;
+      metadata: Prisma.JsonValue | null;
+    },
+  ): unknown[] {
+    const rendered = renderCampaignComponents(components, contact);
+    if (!Array.isArray(rendered)) {
+      throw new CampaignPersonalizationTemplateError("Campaign components must render to an array");
+    }
+    return rendered;
   }
 
   private configurationError(campaign: {

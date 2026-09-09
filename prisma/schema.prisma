@@ -182,6 +182,7 @@ model Contact {
   name                   String?
   language               String?
   timezone               String?
+  tags                   String[]            @default([])
   consentStatus          ConsentStatus       @default(UNKNOWN)
   consentSource          String?
   consentAt              DateTime?
@@ -198,6 +199,7 @@ model Contact {
   @@unique([tenantId, phone])
   @@index([tenantId, consentStatus, createdAt])
   @@index([tenantId, serviceWindowExpiresAt])
+  @@index([tags], type: Gin)
 }
 
 model ContactConsentEvent {
@@ -216,31 +218,32 @@ model ContactConsentEvent {
 }
 
 model Campaign {
-  id                  String              @id @default(uuid()) @db.Uuid
-  tenantId            String              @db.Uuid
-  senderId            String              @db.Uuid
-  templateId          String              @db.Uuid
-  name                String
-  status              CampaignStatus      @default(DRAFT)
-  audience            Json
-  components          Json?
-  scheduledAt         DateTime?
-  snapshotAt          DateTime?
-  startedAt           DateTime?
-  completedAt         DateTime?
-  cancelledAt         DateTime?
-  failureReason       String?
-  totalRecipients     Int                 @default(0)
-  queuedRecipients    Int                 @default(0)
-  skippedRecipients   Int                 @default(0)
-  failedRecipients    Int                 @default(0)
-  cancelledRecipients Int                 @default(0)
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  tenant              Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sender              WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Restrict)
-  template            MessageTemplate     @relation(fields: [templateId], references: [id], onDelete: Restrict)
-  recipients          CampaignRecipient[]
+  id                     String              @id @default(uuid()) @db.Uuid
+  tenantId               String              @db.Uuid
+  senderId               String              @db.Uuid
+  templateId             String              @db.Uuid
+  name                   String
+  status                 CampaignStatus      @default(DRAFT)
+  audience               Json
+  components             Json?
+  personalizationEnabled Boolean             @default(false)
+  scheduledAt            DateTime?
+  snapshotAt             DateTime?
+  startedAt              DateTime?
+  completedAt            DateTime?
+  cancelledAt            DateTime?
+  failureReason          String?
+  totalRecipients        Int                 @default(0)
+  queuedRecipients       Int                 @default(0)
+  skippedRecipients      Int                 @default(0)
+  failedRecipients       Int                 @default(0)
+  cancelledRecipients    Int                 @default(0)
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sender                 WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  template               MessageTemplate     @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  recipients             CampaignRecipient[]
 
   @@index([tenantId, status, scheduledAt, createdAt])
   @@index([status, scheduledAt])

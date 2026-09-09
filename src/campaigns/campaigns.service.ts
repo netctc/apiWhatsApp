@@ -14,6 +14,10 @@ import {
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { TemplatesService } from "../templates/templates.service.js";
+import {
+  CampaignPersonalizationTemplateError,
+  validateCampaignComponents,
+} from "./campaign-personalization.util.js";
 import type { CampaignAudienceDto } from "./dto/campaign-audience.dto.js";
 import { CreateCampaignDto } from "./dto/create-campaign.dto.js";
 import { ListCampaignRecipientsQueryDto } from "./dto/list-campaign-recipients-query.dto.js";
@@ -23,6 +27,8 @@ interface NormalizedCampaignAudience {
   allOptedIn: boolean;
   contactIds?: string[];
   language?: string;
+  tagsAny?: string[];
+  tagsAll?: string[];
 }
 
 @Injectable()
@@ -34,10 +40,15 @@ export class CampaignsService {
   ) {}
 
   async create(tenantId: string, dto: CreateCampaignDto) {
+    const personalizationEnabled = dto.personalizationEnabled === true;
     const audience = this.normalizeAudience(dto.audience);
     const name = dto.name.trim();
     if (!name) {
       throw new BadRequestException("Campaign name must contain non-whitespace characters");
+    }
+
+    if (personalizationEnabled && dto.components) {
+      this.assertComponentsValid(dto.components);
     }
 
     const sender = await this.phoneNumbers.resolveForTenant(tenantId, dto.senderId);
@@ -61,6 +72,7 @@ export class CampaignsService {
         name,
         audience: this.toJson(audience),
         components: dto.components ? this.toJson(dto.components) : undefined,
+        personalizationEnabled,
         scheduledAt,
       },
       include: this.campaignInclude(),
@@ -141,6 +153,8 @@ export class CampaignsService {
             phone: true,
             name: true,
             language: true,
+            timezone: true,
+            tags: true,
             consentStatus: true,
           },
         },
@@ -204,12 +218,14 @@ export class CampaignsService {
         this.assertMarketingTemplate(campaign.template, campaign.sender.wabaId);
 
         const audience = this.readAudience(campaign.audience);
+        const tagFilter = this.tagFilter(audience);
         const contactIds = await transaction.contact.findMany({
           where: {
             tenantId,
             consentStatus: ConsentStatus.OPTED_IN,
             ...(audience.language ? { language: audience.language } : {}),
             ...(audience.contactIds ? { id: { in: audience.contactIds } } : {}),
+            ...(tagFilter ? { tags: tagFilter } : {}),
           },
           select: { id: true },
           orderBy: { id: "asc" },
@@ -434,10 +450,14 @@ export class CampaignsService {
     }
 
     const language = audience?.language?.trim();
+    const tagsAny = this.normalizeTags(audience?.tagsAny);
+    const tagsAll = this.normalizeTags(audience?.tagsAll);
     return {
       allOptedIn,
       ...(hasExplicitContacts ? { contactIds } : {}),
       ...(language ? { language } : {}),
+      ...(tagsAny.length > 0 ? { tagsAny } : {}),
+      ...(tagsAll.length > 0 ? { tagsAll } : {}),
     };
   }
 
@@ -449,6 +469,8 @@ export class CampaignsService {
       allOptedIn?: unknown;
       contactIds?: unknown;
       language?: unknown;
+      tagsAny?: unknown;
+      tagsAll?: unknown;
     };
     const allOptedIn = candidate.allOptedIn === true;
     const contactIds = Array.isArray(candidate.contactIds)
@@ -458,13 +480,50 @@ export class CampaignsService {
     if (allOptedIn === hasContacts) {
       throw new UnprocessableEntityException("Campaign audience configuration is ambiguous");
     }
+
+    const tagsAny = this.readStringArray(candidate.tagsAny);
+    const tagsAll = this.readStringArray(candidate.tagsAll);
     return {
       allOptedIn,
       ...(hasContacts ? { contactIds } : {}),
       ...(typeof candidate.language === "string" && candidate.language.length > 0
         ? { language: candidate.language }
         : {}),
+      ...(tagsAny.length > 0 ? { tagsAny } : {}),
+      ...(tagsAll.length > 0 ? { tagsAll } : {}),
     };
+  }
+
+  private tagFilter(audience: NormalizedCampaignAudience): Prisma.StringNullableListFilter | undefined {
+    if (!audience.tagsAny && !audience.tagsAll) {
+      return undefined;
+    }
+    return {
+      ...(audience.tagsAny ? { hasSome: audience.tagsAny } : {}),
+      ...(audience.tagsAll ? { hasEvery: audience.tagsAll } : {}),
+    };
+  }
+
+  private normalizeTags(tags?: string[]): string[] {
+    return [...new Set((tags ?? []).map((tag) => tag.trim().toLowerCase()))].sort();
+  }
+
+  private readStringArray(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return this.normalizeTags(value.filter((item): item is string => typeof item === "string"));
+  }
+
+  private assertComponentsValid(components: unknown): void {
+    try {
+      validateCampaignComponents(components);
+    } catch (error) {
+      if (error instanceof CampaignPersonalizationTemplateError) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
   }
 
   private assertMarketingTemplate(

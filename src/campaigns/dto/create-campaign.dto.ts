@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Type } from "class-transformer";
 import {
   IsArray,
+  IsBoolean,
   IsDefined,
   IsISO8601,
   IsOptional,
@@ -36,7 +37,17 @@ export class CreateCampaignDto {
   audience!: CampaignAudienceDto;
 
   @ApiPropertyOptional({
-    description: "Static Meta template components shared by every recipient in this campaign.",
+    description:
+      "Enable safe per-recipient replacement of allowlisted full-value contact tokens inside components. Defaults to false for backward compatibility.",
+    default: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  personalizationEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      "Meta template components. Static by default; when personalizationEnabled=true, allowlisted full-value contact tokens are rendered per recipient.",
     type: "array",
     items: { type: "object" },
   })
