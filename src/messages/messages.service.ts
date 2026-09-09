@@ -7,6 +7,7 @@ import { TemplatesService } from "../templates/templates.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
 import { ListMessagesQueryDto } from "./dto/list-messages-query.dto.js";
 import { OutboundPolicyService } from "./outbound-policy.service.js";
+import { deriveTrafficClass } from "./traffic-class.util.js";
 
 const OUTBOUND_REQUESTED_EVENT = "message.outbound.requested";
 
@@ -33,13 +34,18 @@ export class MessagesService {
     await this.outboundPolicy.assertAllowed(tenantId, dto.to, dto.type);
     const normalizedTo = normalizePhoneNumber(dto.to);
     const sender = await this.phoneNumbers.resolveForTenant(tenantId, dto.senderId);
+    const messageType = this.mapType(dto.type);
+    let templateCategory: string | null | undefined;
 
     if (dto.type === OutboundMessageType.TEMPLATE) {
       if (!sender.wabaId) {
         throw new UnprocessableEntityException("The selected WhatsApp sender is missing its WABA ID");
       }
-      await this.templates.assertApproved(tenantId, sender.wabaId, dto.payload);
+      const template = await this.templates.assertApproved(tenantId, sender.wabaId, dto.payload);
+      templateCategory = template.category;
     }
+
+    const trafficClass = deriveTrafficClass(messageType, templateCategory);
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
@@ -48,7 +54,8 @@ export class MessagesService {
             tenantId,
             senderId: sender.id,
             direction: MessageDirection.OUTBOUND,
-            type: this.mapType(dto.type),
+            trafficClass,
+            type: messageType,
             status: MessageStatus.QUEUED,
             to: normalizedTo,
             idempotencyKey: dto.idempotencyKey,
@@ -64,7 +71,7 @@ export class MessagesService {
             aggregateType: "Message",
             aggregateId: message.id,
             eventType: OUTBOUND_REQUESTED_EVENT,
-            payload: { messageId: message.id },
+            payload: { messageId: message.id, trafficClass },
           },
         });
 
@@ -99,6 +106,7 @@ export class MessagesService {
       tenantId,
       ...(query.direction ? { direction: query.direction } : {}),
       ...(query.status ? { status: query.status } : {}),
+      ...(query.trafficClass ? { trafficClass: query.trafficClass } : {}),
       ...(query.senderId ? { senderId: query.senderId } : {}),
       ...(phone ? { OR: [{ to: phone }, { from: phone }] } : {}),
     };
