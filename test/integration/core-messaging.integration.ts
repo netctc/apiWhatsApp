@@ -14,6 +14,13 @@ interface MetaMockCall {
   body: Record<string, unknown>;
 }
 
+interface BurstResult {
+  status?: number;
+  messageId?: string;
+  durationMs: number;
+  error?: string;
+}
+
 const PHONE = "96170123456";
 const API_KEY_HASH_SECRET = "integration-api-key-hash-secret-0123456789abcdef";
 const TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -58,6 +65,7 @@ function listen(server: Server): Promise<number> {
 }
 
 async function closeServer(server: Server): Promise<void> {
+  server.closeAllConnections();
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
@@ -163,7 +171,10 @@ describe("core messaging integration", () => {
         transform: true,
       }),
     );
-    await app.init();
+    // Bind one stable HTTP listener before issuing concurrent Supertest requests.
+    // When Supertest receives an unbound server it may start/stop ephemeral listeners per request,
+    // which is unsafe under a burst and can create client-side ECONNRESET failures unrelated to the API.
+    await app.listen(0, "127.0.0.1");
     worker = await NestFactory.createApplicationContext(WorkerModule, { logger: false });
     prisma = app.get(PrismaService);
 
@@ -316,27 +327,39 @@ describe("core messaging integration", () => {
     const total = Number(process.env.INTEGRATION_BURST_MESSAGES ?? 50);
     const maxP95Ms = Number(process.env.INTEGRATION_ACCEPT_P95_MS ?? 3000);
     const initialMetaCalls = metaCalls.length;
+    const burstId = Date.now();
 
-    const results = await Promise.all(
+    // Every request resolves to a diagnostic result, even on a transport failure. This prevents
+    // Promise.all from abandoning sibling requests while they are still mutating test state.
+    const results: BurstResult[] = await Promise.all(
       Array.from({ length: total }, async (_, index) => {
         const startedAt = performance.now();
-        const response = await request(app.getHttpServer())
-          .post("/api/v1/messages")
-          .set("X-API-Key", apiKey)
-          .set("Idempotency-Key", `integration-burst-${Date.now()}-${index}`)
-          .send({
-            to: `+${PHONE}`,
-            type: "TEXT",
-            payload: { body: `Burst message ${index}` },
-          });
-        return {
-          status: response.status,
-          messageId: response.body.messageId as string | undefined,
-          durationMs: performance.now() - startedAt,
-        };
+        try {
+          const response = await request(app.getHttpServer())
+            .post("/api/v1/messages")
+            .set("X-API-Key", apiKey)
+            .set("Idempotency-Key", `integration-burst-${burstId}-${index}`)
+            .send({
+              to: `+${PHONE}`,
+              type: "TEXT",
+              payload: { body: `Burst message ${index}` },
+            });
+          return {
+            status: response.status,
+            messageId: response.body.messageId as string | undefined,
+            durationMs: performance.now() - startedAt,
+          };
+        } catch (error) {
+          return {
+            durationMs: performance.now() - startedAt,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
       }),
     );
 
+    const transportErrors = results.filter((result) => result.error);
+    expect(transportErrors).toEqual([]);
     expect(results.every((result) => result.status === 202)).toBe(true);
     const messageIds = results.map((result) => result.messageId).filter((id): id is string => !!id);
     expect(messageIds).toHaveLength(total);
