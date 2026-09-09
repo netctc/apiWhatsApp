@@ -172,19 +172,18 @@ export class PhoneNumbersService {
   }
 
   async findTenantIdByWabaId(wabaId: string): Promise<string> {
-    const owners = await this.prisma.whatsAppPhoneNumber.findMany({
+    const rows = await this.prisma.whatsAppPhoneNumber.findMany({
       where: { wabaId },
-      distinct: ["tenantId"],
       select: { tenantId: true },
-      take: 2,
     });
+    const owners = [...new Set(rows.map((row) => row.tenantId))];
     if (owners.length === 0) {
       throw new UnprocessableEntityException(`Unconfigured WABA ${wabaId}`);
     }
     if (owners.length > 1) {
       throw new UnprocessableEntityException(`WABA ${wabaId} is ambiguously assigned to multiple tenants`);
     }
-    return owners[0]!.tenantId;
+    return owners[0]!;
   }
 
   private async assertWabaOwnership(tenantId: string, wabaId?: string): Promise<void> {
