@@ -2,9 +2,11 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.11.0
+## Current release: 0.12.0
 
-The platform currently provides:
+Engineering language is English for source code, API contracts, tests, operational documentation, logs, and commit messages.
+
+## Platform capabilities
 
 - NestJS + TypeScript REST API
 - PostgreSQL + Prisma persistence and versioned migrations
@@ -14,7 +16,7 @@ The platform currently provides:
 - Reusable saved contact segments with bounded/indexable criteria
 - Multiple WhatsApp senders per tenant with runtime secret references
 - WABA template synchronization and lifecycle status tracking
-- Local `APPROVED` template enforcement before outbox creation
+- Local `APPROVED` template enforcement before message creation
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues, retries, DLQs, and consumer prefetch by traffic class
 - Priority-aware Redis sender capacity reservation
@@ -26,11 +28,12 @@ The platform currently provides:
 - Safe opt-in per-recipient template personalization
 - Multi-replica campaign processing with leases and crash recovery
 - Live campaign orchestration and WhatsApp delivery analytics
-- Public process liveness and dependency readiness probes
+- Public liveness and dependency readiness probes
 - Tenant-scoped operational status/backlog diagnostics
-- Cursor-paginated message, template, campaign, recipient, and audit APIs
+- Reproducible dependency installation with committed npm lockfile
+- Production runtime high/critical vulnerability gate
+- Reproducible multi-stage Docker build
 - OpenAPI / Swagger
-- Docker-based local infrastructure
 
 ## Architecture
 
@@ -40,9 +43,7 @@ flowchart LR
     Auth --> API[REST API]
     API --> DB[(PostgreSQL)]
     API --> Segment[Saved Segment]
-    Segment --> DB
-    API --> Campaign[Campaign Draft]
-    Campaign --> DB
+    API --> Campaign[Campaign]
     DB --> CampaignProcessor[Campaign Processor]
     CampaignProcessor --> Policy[Shared Message Policy]
     Policy --> DB
@@ -60,23 +61,25 @@ flowchart LR
     Meta --> Webhook[Signed Webhook]
     Webhook --> DB
     DB --> WebhookProcessor[Webhook Processor]
-    WebhookProcessor --> DB
-    DB --> Analytics[Live Campaign Analytics]
+    DB --> Analytics[Campaign Analytics]
     DB --> Operations[Tenant Operations Snapshot]
 ```
 
-HTTP requests do not wait for WhatsApp delivery. Outbound messages and their outbox intents are committed atomically before asynchronous publishing and delivery.
+HTTP requests accept and persist outbound work quickly. Actual WhatsApp delivery is asynchronous. Message creation and its outbox intent are committed atomically before RabbitMQ publication.
 
-Campaigns reuse the normal message path. Every campaign recipient becomes an idempotent template message through `MessagesService`, preserving sender ownership, current consent, approved-template validation, MARKETING routing, retries, outbox durability, and sender rate limits.
+Campaigns reuse the normal `MessagesService` path, so campaign traffic cannot bypass tenant ownership, current consent, template approval, idempotency, outbox durability, priority routing, retry policy, or sender rate limits.
 
 ## Requirements
 
 - Node.js 24+
 - npm 11+
 - Docker and Docker Compose
+- PostgreSQL
+- Redis
+- RabbitMQ
 - Meta application with WhatsApp Business Platform access
 - One or more WhatsApp Business phone numbers
-- WABA ID for senders that use templates
+- WABA ID for template senders
 - Meta access token for each configured sender
 - Meta app secret and webhook verify token
 
@@ -85,7 +88,7 @@ Campaigns reuse the normal message path. Every campaign recipient becomes an ide
 ```bash
 cp .env.example .env
 docker compose up -d
-npm install
+npm ci
 npm run prisma:generate
 npm run prisma:deploy
 npm run bootstrap:tenant -- --name="Acme" --slug=acme --key-name=bootstrap
@@ -93,7 +96,7 @@ npm run bootstrap:tenant -- --name="Acme" --slug=acme --key-name=bootstrap
 
 The bootstrap command prints the raw tenant API key once. PostgreSQL stores only its HMAC-SHA256 digest.
 
-Run the API and outbound worker separately:
+Run the API and worker separately:
 
 ```bash
 npm run start:dev
@@ -112,7 +115,9 @@ Business endpoints require:
 X-API-Key: wapi_<prefix>_<secret>
 ```
 
-Tenant identity is derived only from the authenticated key. Supported scopes:
+Tenant identity is derived only from the authenticated key and is never accepted from a client payload.
+
+Current scopes:
 
 ```text
 messages:read
@@ -133,42 +138,25 @@ api_keys:write
 audit:read
 ```
 
-A delegated key cannot grant scopes that the actor key does not hold. Raw keys and key hashes are never returned by list or audit APIs.
+A delegated API key cannot grant scopes that the actor key does not already hold. Raw keys and key hashes are never returned by list or audit APIs.
 
-## Operational health and diagnostics
-
-Liveness and readiness are intentionally separate.
+## Messaging API
 
 ```text
-GET /api/health
-GET /api/health/live
-GET /api/health/ready
+POST /api/v1/messages
+GET  /api/v1/messages
+GET  /api/v1/messages/{messageId}
 ```
 
-`/api/health` remains a backward-compatible alias for process-only liveness. Liveness does not call PostgreSQL, Redis, RabbitMQ, Meta, or any other remote dependency.
+Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text requires an open 24-hour customer service window.
 
-`/api/health/ready` concurrently checks PostgreSQL, Redis, and RabbitMQ with a bounded per-dependency timeout. It returns HTTP `200` only when all required dependencies are available and HTTP `503` with a structured dependency report otherwise. `HEALTH_DEPENDENCY_TIMEOUT_MS` defaults to `1500` ms and is bounded by the application.
-
-The public health response contains only dependency status, duration, and a coarse error classification (`not_configured`, `timeout`, or `unavailable`). It does not expose connection strings, broker topology, credentials, payloads, or exception text.
-
-Tenant operational diagnostics require `operations:read`:
+Outbound lifecycle:
 
 ```text
-GET /api/v1/operations/snapshot
+QUEUED -> PROCESSING -> SUBMITTED -> SENT -> DELIVERED -> READ
+                              \
+                               -> FAILED
 ```
-
-The snapshot includes only tenant-scoped counters:
-
-- message counts by current status;
-- outbound message counts by server-derived traffic class;
-- campaign counts by lifecycle status;
-- campaign-recipient counts by orchestration status;
-- unpublished transactional-outbox counts (`pending`, `due`, `leased`, `withErrors`);
-- age in seconds of the tenant's oldest unpublished message outbox event.
-
-Outbox metrics are joined through the tenant's persisted `Message` rows and restricted to the `message.outbound.requested` event. The API does not return message/customer identifiers, phone numbers, provider payloads, message bodies, or credentials.
-
-Global webhook backlog is deliberately not exposed by this tenant endpoint because `WebhookEvent` is not tenant-attributed in the current data model.
 
 ## WhatsApp senders
 
@@ -184,7 +172,7 @@ Register sender metadata with a runtime credential reference:
 }
 ```
 
-The referenced Meta access token is never stored in PostgreSQL.
+Raw Meta sender access tokens are never stored in PostgreSQL.
 
 ```text
 POST  /api/v1/phone-numbers
@@ -201,13 +189,13 @@ GET  /api/v1/templates
 GET  /api/v1/templates/{templateId}
 ```
 
-Templates are synchronized at WABA level. The complete remote catalog must be read successfully before local deletion states are applied. Malformed or incomplete pagination aborts synchronization.
+Templates are synchronized at WABA level. Local deletion is applied only after the complete remote catalog has been read successfully. Malformed or incomplete provider pagination aborts synchronization.
 
-Meta `message_template_status_update` webhook events update local lifecycle state. New template messages require an exact local `name + language + WABA` match with status `APPROVED`.
+Meta `message_template_status_update` webhooks update local lifecycle status. New template messages require an exact local `name + language + WABA` match with status `APPROVED`.
 
 ## Traffic classes and priority routing
 
-Clients cannot submit priority. The server derives it from trusted local metadata:
+Clients cannot choose message priority. The server derives it from trusted synchronized template metadata.
 
 | Source | Traffic class |
 | --- | --- |
@@ -216,9 +204,7 @@ Clients cannot submit priority. The server derives it from trusted local metadat
 | `UTILITY` or other approved template | `TRANSACTIONAL` |
 | Free-form service reply | `TRANSACTIONAL` |
 
-The class is persisted on `Message`, copied into the outbox intent, and verified by the worker before Meta is called.
-
-Default RabbitMQ queues:
+Default queues:
 
 ```text
 whatsapp.outbound.otp
@@ -226,11 +212,11 @@ whatsapp.outbound.transactional
 whatsapp.outbound.marketing
 ```
 
-The legacy base queue remains consumed as transactional traffic during rolling upgrades.
+The traffic class is persisted on `Message`, copied into the outbox intent, and verified again by the worker before Meta is called.
 
-## Contacts and tags
+## Contacts, consent, and tags
 
-Contacts support normalized lowercase tags:
+Contacts support normalized lowercase tags and immutable consent history.
 
 ```json
 {
@@ -246,11 +232,11 @@ Contacts support normalized lowercase tags:
 }
 ```
 
-Tags are validated as bounded slug-like values, normalized to lowercase, deduplicated, and stored in a PostgreSQL string array with a GIN index.
+Opt-out blocks new outbound messages. Template messages require explicit opt-in. Inbound messages update the contact's last inbound timestamp and monotonically extend the customer service window.
 
 ## Saved contact segments
 
-Reusable segments are tenant-scoped named definitions over bounded, indexable contact attributes. They do not accept arbitrary JSON predicates, SQL fragments, JavaScript, JSONPath, or expression languages.
+Reusable segments are tenant-scoped definitions over bounded, indexable contact attributes.
 
 Supported criteria:
 
@@ -260,9 +246,7 @@ tagsAny    contact has at least one tag
 tagsAll    contact has every tag
 ```
 
-Every saved segment must contain at least one criterion. Segment evaluation always adds tenant ownership and `OPTED_IN` on the server.
-
-Endpoints:
+Segments do not accept arbitrary SQL, JSON predicates, JavaScript, JSONPath, or an expression language.
 
 ```text
 POST  /api/v1/segments
@@ -272,25 +256,11 @@ GET   /api/v1/segments/{segmentId}/count
 PATCH /api/v1/segments/{segmentId}
 ```
 
-Example:
-
-```json
-{
-  "name": "VIP renewals",
-  "description": "Opted-in VIP contacts eligible for renewal campaigns.",
-  "definition": {
-    "language": "en_US",
-    "tagsAny": ["renewal:2026", "vip"],
-    "tagsAll": ["marketing"]
-  }
-}
-```
-
-Definitions are normalized before persistence. `GET /segments/{id}/count` evaluates the current contact population and returns an observation timestamp. Inactive segments remain readable/countable for administration but cannot be attached to a new campaign.
+Segment evaluation always adds tenant ownership and current `OPTED_IN` on the server.
 
 ## Campaigns
 
-Campaigns require a synchronized `APPROVED` `MARKETING` template. Sender and template must belong to the same WABA.
+Campaigns require an `APPROVED` `MARKETING` template on the selected sender WABA.
 
 ```text
 POST /api/v1/campaigns
@@ -304,43 +274,31 @@ POST /api/v1/campaigns/{campaignId}/resume
 POST /api/v1/campaigns/{campaignId}/cancel
 ```
 
-### Explicit audience modes
-
-A campaign must choose exactly one base audience:
+A campaign chooses exactly one base audience:
 
 - `allOptedIn=true`;
 - a non-empty `contactIds` list; or
 - an active saved `segmentId`.
 
-Direct `language`, `tagsAny`, and `tagsAll` filters can narrow the first two modes. They cannot be combined with `segmentId` because a saved segment already owns its definition.
+Campaign launch runs under a row lock and repeatable-read transaction, selects only currently opted-in contacts, and creates an immutable `CampaignRecipient` snapshot. The release hard-caps a campaign snapshot at 50,000 recipients.
 
-Example using a saved segment:
+When a saved segment is used, its normalized definition is copied into the campaign draft. Later edits to the saved segment cannot silently alter the existing campaign.
 
-```json
-{
-  "name": "September VIP renewal",
-  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d",
-  "templateId": "31ee3b2f-5fbd-44bb-a4aa-b252a3a66c12",
-  "audience": {
-    "segmentId": "f6e7b52b-03a2-4b13-84f9-f616de5d34f2"
-  },
-  "scheduledAt": "2026-09-10T09:00:00Z"
-}
+Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`, allowing multiple replicas to process campaigns concurrently. Expired `PROCESSING` leases are reclaimable.
+
+Each recipient has a deterministic logical message key:
+
+```text
+campaign:<campaignId>:contact:<contactId>
 ```
 
-When the draft is created, the service resolves only an active segment owned by the authenticated tenant and copies the normalized definition into `Campaign.audience` together with source metadata (`segmentId`, `segmentName`, `segmentUpdatedAt`).
+This prevents duplicate logical messages during retries and crash recovery.
 
-This copy is intentional. Launch never re-reads the live segment. Editing or deactivating the saved segment later does not silently change the definition of a campaign draft that already exists.
+### Personalization
 
-Launch executes under a campaign row lock and repeatable-read transaction, selecting only currently `OPTED_IN` contacts and creating an immutable `CampaignRecipient` snapshot. `CAMPAIGN_MAX_RECIPIENTS` has an absolute 50,000-recipient safety cap.
+Personalization is disabled by default and must be explicitly enabled.
 
-Consent is checked again immediately before message creation. A contact that opts out after the snapshot is marked `SKIPPED` and receives no new message.
-
-### Safe per-recipient personalization
-
-Personalization is disabled by default. Enable it explicitly with `personalizationEnabled=true`.
-
-Supported full-value token sources:
+Supported full-value tokens:
 
 ```text
 {{contact.name}}
@@ -350,61 +308,11 @@ Supported full-value token sources:
 {{contact.metadata.<top-level-scalar-key>}}
 ```
 
-No JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are evaluated. A token must occupy the complete string value. Missing recipient values mark only that recipient `SKIPPED`.
+No JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are executed.
 
-`Campaign.personalizationEnabled` is a dedicated boolean column with database default `false`, so campaigns created before personalization retain static component semantics.
+### Analytics
 
-### Processing and crash recovery
-
-Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`, allowing multiple application replicas to process campaigns without claiming the same recipient.
-
-Both due `PENDING` recipients and expired `PROCESSING` leases are reclaimable. Each recipient has one deterministic message key:
-
-```text
-campaign:<campaignId>:contact:<contactId>
-```
-
-If a process creates the message and crashes before linking the recipient, a later processor first looks up that existing message before re-evaluating campaign state, consent, or personalization.
-
-`COMPLETED` is an orchestration state: all snapshot recipients reached `QUEUED`, `SKIPPED`, `FAILED`, or `CANCELLED`. WhatsApp delivery state remains on each linked `Message`.
-
-### Live campaign analytics
-
-```text
-GET /api/v1/campaigns/{campaignId}/analytics
-```
-
-The endpoint requires `campaigns:read`, verifies tenant ownership, and reads directly from authoritative `CampaignRecipient` and linked `Message` records.
-
-It returns orchestration status counts, cumulative created/submitted/sent/delivered/read/failed milestones, current message status distribution, consistency signaling, and percentage rates:
-
-```text
-messageCreationRate = created / snapshotRecipients
-submissionRate      = submitted / created
-deliveryRate        = delivered / submitted
-readRate            = read / delivered
-failureRate         = failed / created
-```
-
-Rates use a `0-100` scale and are `null` when the denominator is zero. Analytics are live observations and include `generatedAt`.
-
-## Messaging API
-
-```text
-POST /api/v1/messages
-GET  /api/v1/messages
-GET  /api/v1/messages/{messageId}
-```
-
-Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text requires an open 24-hour service window.
-
-Outbound lifecycle:
-
-```text
-QUEUED -> PROCESSING -> SUBMITTED -> SENT -> DELIVERED -> READ
-                              \
-                               -> FAILED
-```
+`GET /api/v1/campaigns/{campaignId}/analytics` reads from authoritative recipient/message records and returns orchestration counts, cumulative message milestones, current message status distribution, consistency signaling, and percentage rates.
 
 ## Webhooks
 
@@ -424,23 +332,77 @@ verify signature -> persist raw event -> HTTP 200 -> process asynchronously
 
 The durable processor handles inbound messages, outbound delivery receipts, and template lifecycle updates before marking an event processed.
 
+## Health and operational diagnostics
+
+Public probes:
+
+```text
+GET /api/health
+GET /api/health/live
+GET /api/health/ready
+```
+
+`/api/health` remains a backward-compatible liveness alias. Liveness does not call external dependencies.
+
+Readiness checks PostgreSQL, Redis, and RabbitMQ concurrently with a bounded timeout and returns HTTP `503` when any required dependency is unavailable.
+
+Tenant operations require `operations:read`:
+
+```text
+GET /api/v1/operations/snapshot
+```
+
+The snapshot exposes counters only: message status, traffic class, campaign status, recipient status, and tenant-owned transactional-outbox backlog. It does not return phone numbers, contact IDs, message bodies, provider payloads, or credentials.
+
+## Supply-chain and build reproducibility
+
+Release `0.12.0` introduces a committed npm lockfile and deterministic installation policy.
+
+Development/CI installation:
+
+```bash
+npm ci
+```
+
+Production runtime installation:
+
+```bash
+npm ci --omit=dev --omit=peer --ignore-scripts
+npm run audit:prod
+```
+
+Security policy:
+
+- `package-lock.json` is committed and CI uses `npm ci`;
+- the production image is built from the same lockfile;
+- development and optional peer tooling are omitted from the production runtime image;
+- the CI runtime-security job fails when a high or critical advisory affects a package physically installed in the production runtime tree;
+- lockfile-only advisories for omitted development/peer tooling do not cause a false production failure;
+- vulnerable transitive `multer` versions are overridden to `2.3.0` until upstream dependency constraints no longer require the override;
+- a production Docker image build is a CI gate.
+
+The runtime security check does not suppress an installed vulnerability. It distinguishes the actual production dependency tree from packages that remain represented in the npm lockfile but are intentionally omitted from the production installation.
+
 ## Reliability defaults
 
 - Transactional outbox
+- Durable RabbitMQ queues
 - Retry delays: `5s -> 30s -> 2m -> 10m -> DLQ`
 - Per-message processing leases
 - Per-sender Redis rate limiting
-- Traffic-class-specific RabbitMQ consumer channels
+- Traffic-class-specific consumers
 - Campaign recipient leases with expired-claim recovery
 - Deterministic campaign message idempotency
 - Conditional campaign lifecycle transitions
 - Durable signed webhook ingestion and retry
-- Explicit liveness/readiness separation for orchestration platforms
-- Tenant-scoped operational backlog inspection
+- Explicit liveness/readiness separation
+- Reproducible dependency installation
+- Production runtime vulnerability gate
 
-## Production commands
+## Production build
 
 ```bash
+npm ci
 npm run prisma:generate
 npm run build
 npm run prisma:deploy
@@ -451,6 +413,12 @@ Worker:
 
 ```bash
 npm run start:worker
+```
+
+Container:
+
+```bash
+docker build -t api-whatsapp .
 ```
 
 ## Important environment variables
@@ -480,18 +448,17 @@ CAMPAIGN_PROCESSOR_LEASE_MS
 CAMPAIGN_RECIPIENT_MAX_ATTEMPTS
 ```
 
-Never commit production credentials or tokens.
+Never commit production credentials or access tokens.
 
 ## Next implementation slices
 
 - distributed tracing, metrics export, and alerting
 - integration and load tests
-- dependency lockfile and supply-chain hardening
-- administrative audit coverage for sender/template/segment configuration changes
+- additional administrative audit coverage
 - provider-backed secret stores beyond environment references
 - media messages and media storage
 - agent inbox and conversation assignment
 
 ## Repository workflow
 
-Changes are developed through feature branches and pull requests. Source code, tests, operational documentation, API names, and commit messages use English as the primary engineering language.
+Changes are developed through feature branches and pull requests. Pull requests must pass deterministic dependency installation, Prisma generation, lint, TypeScript/Nest build, unit tests, production-runtime security validation, and Docker image construction before merge.
