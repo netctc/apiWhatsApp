@@ -10,6 +10,8 @@ export enum ApiScope {
   PHONE_NUMBERS_WRITE = "phone_numbers:write",
   TEMPLATES_READ = "templates:read",
   TEMPLATES_WRITE = "templates:write",
+  CAMPAIGNS_READ = "campaigns:read",
+  CAMPAIGNS_WRITE = "campaigns:write",
   API_KEYS_READ = "api_keys:read",
   API_KEYS_WRITE = "api_keys:write",
   AUDIT_READ = "audit:read",
