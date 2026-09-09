@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.12.0
+## Current release: 0.13.0
 
 Engineering language is English for source code, API contracts, tests, operational documentation, logs, and commit messages.
 
@@ -30,6 +30,9 @@ Engineering language is English for source code, API contracts, tests, operation
 - Live campaign orchestration and WhatsApp delivery analytics
 - Public liveness and dependency readiness probes
 - Tenant-scoped operational status/backlog diagnostics
+- Prometheus-compatible process, HTTP, message, campaign, outbox, and webhook metrics
+- W3C trace/request correlation across HTTP -> outbox -> RabbitMQ -> worker
+- Baseline Prometheus alert rules
 - Reproducible dependency installation with committed npm lockfile
 - Production runtime high/critical vulnerability gate
 - Reproducible multi-stage Docker build
@@ -39,14 +42,9 @@ Engineering language is English for source code, API contracts, tests, operation
 
 ```mermaid
 flowchart LR
-    Client[CRM / ERP / Application] --> Auth[X-API-Key]
-    Auth --> API[REST API]
+    Client[CRM / ERP / Application] --> API[REST API]
     API --> DB[(PostgreSQL)]
-    API --> Segment[Saved Segment]
-    API --> Campaign[Campaign]
     DB --> CampaignProcessor[Campaign Processor]
-    CampaignProcessor --> Policy[Shared Message Policy]
-    Policy --> DB
     DB --> Outbox[Transactional Outbox]
     Outbox --> Router[Traffic Router]
     Router --> OTP[(RabbitMQ OTP)]
@@ -63,11 +61,10 @@ flowchart LR
     DB --> WebhookProcessor[Webhook Processor]
     DB --> Analytics[Campaign Analytics]
     DB --> Operations[Tenant Operations Snapshot]
+    DB --> Metrics[Prometheus Metrics]
 ```
 
-HTTP requests accept and persist outbound work quickly. Actual WhatsApp delivery is asynchronous. Message creation and its outbox intent are committed atomically before RabbitMQ publication.
-
-Campaigns reuse the normal `MessagesService` path, so campaign traffic cannot bypass tenant ownership, current consent, template approval, idempotency, outbox durability, priority routing, retry policy, or sender rate limits.
+Outbound HTTP requests do not wait for WhatsApp delivery. Message creation and its outbox intent are committed atomically before RabbitMQ publication. Campaign sends reuse the normal `MessagesService` path and therefore cannot bypass tenant ownership, current consent, template approval, idempotency, priority routing, retries, or sender rate limits.
 
 ## Requirements
 
@@ -214,31 +211,11 @@ whatsapp.outbound.marketing
 
 The traffic class is persisted on `Message`, copied into the outbox intent, and verified again by the worker before Meta is called.
 
-## Contacts, consent, and tags
+## Contacts, consent, segments, and campaigns
 
-Contacts support normalized lowercase tags and immutable consent history.
+Contacts support normalized lowercase tags and immutable consent history. Opt-out blocks new outbound messages. Inbound messages update the contact's last inbound timestamp and monotonically extend the customer service window.
 
-```json
-{
-  "phone": "+96170123456",
-  "name": "Jane Doe",
-  "language": "en_US",
-  "timezone": "Asia/Beirut",
-  "tags": ["vip", "renewal:2026"],
-  "metadata": {
-    "plan": "gold",
-    "points": 42
-  }
-}
-```
-
-Opt-out blocks new outbound messages. Template messages require explicit opt-in. Inbound messages update the contact's last inbound timestamp and monotonically extend the customer service window.
-
-## Saved contact segments
-
-Reusable segments are tenant-scoped definitions over bounded, indexable contact attributes.
-
-Supported criteria:
+Saved segments support bounded/indexable criteria only:
 
 ```text
 language   exact match
@@ -246,7 +223,7 @@ tagsAny    contact has at least one tag
 tagsAll    contact has every tag
 ```
 
-Segments do not accept arbitrary SQL, JSON predicates, JavaScript, JSONPath, or an expression language.
+Segments never accept arbitrary SQL, JSON predicates, JavaScript, JSONPath, or an expression language.
 
 ```text
 POST  /api/v1/segments
@@ -255,10 +232,6 @@ GET   /api/v1/segments/{segmentId}
 GET   /api/v1/segments/{segmentId}/count
 PATCH /api/v1/segments/{segmentId}
 ```
-
-Segment evaluation always adds tenant ownership and current `OPTED_IN` on the server.
-
-## Campaigns
 
 Campaigns require an `APPROVED` `MARKETING` template on the selected sender WABA.
 
@@ -274,17 +247,9 @@ POST /api/v1/campaigns/{campaignId}/resume
 POST /api/v1/campaigns/{campaignId}/cancel
 ```
 
-A campaign chooses exactly one base audience:
+A campaign chooses exactly one base audience: `allOptedIn=true`, a non-empty `contactIds` list, or an active saved `segmentId`.
 
-- `allOptedIn=true`;
-- a non-empty `contactIds` list; or
-- an active saved `segmentId`.
-
-Campaign launch runs under a row lock and repeatable-read transaction, selects only currently opted-in contacts, and creates an immutable `CampaignRecipient` snapshot. The release hard-caps a campaign snapshot at 50,000 recipients.
-
-When a saved segment is used, its normalized definition is copied into the campaign draft. Later edits to the saved segment cannot silently alter the existing campaign.
-
-Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`, allowing multiple replicas to process campaigns concurrently. Expired `PROCESSING` leases are reclaimable.
+Launch runs under a row lock and repeatable-read transaction, selects only currently opted-in contacts, and creates an immutable `CampaignRecipient` snapshot. Saved segment definitions are copied into the campaign draft so later segment edits cannot silently alter an existing campaign. Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`; expired `PROCESSING` leases are reclaimable.
 
 Each recipient has a deterministic logical message key:
 
@@ -292,27 +257,7 @@ Each recipient has a deterministic logical message key:
 campaign:<campaignId>:contact:<contactId>
 ```
 
-This prevents duplicate logical messages during retries and crash recovery.
-
-### Personalization
-
-Personalization is disabled by default and must be explicitly enabled.
-
-Supported full-value tokens:
-
-```text
-{{contact.name}}
-{{contact.phone}}
-{{contact.language}}
-{{contact.timezone}}
-{{contact.metadata.<top-level-scalar-key>}}
-```
-
-No JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are executed.
-
-### Analytics
-
-`GET /api/v1/campaigns/{campaignId}/analytics` reads from authoritative recipient/message records and returns orchestration counts, cumulative message milestones, current message status distribution, consistency signaling, and percentage rates.
+Personalization is disabled by default. When explicitly enabled, only allowlisted full-value tokens such as `{{contact.name}}` and `{{contact.metadata.plan}}` are resolved. No JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are executed.
 
 ## Webhooks
 
@@ -323,8 +268,6 @@ GET/POST /api/v1/webhooks/meta/whatsapp
 ```
 
 POST requests require a valid `X-Hub-Signature-256` generated with `META_APP_SECRET`.
-
-Processing path:
 
 ```text
 verify signature -> persist raw event -> HTTP 200 -> process asynchronously
@@ -342,11 +285,9 @@ GET /api/health/live
 GET /api/health/ready
 ```
 
-`/api/health` remains a backward-compatible liveness alias. Liveness does not call external dependencies.
+`/api/health` remains a backward-compatible liveness alias. Liveness does not call external dependencies. Readiness checks PostgreSQL, Redis, and RabbitMQ concurrently with a bounded timeout and returns HTTP `503` when any required dependency is unavailable.
 
-Readiness checks PostgreSQL, Redis, and RabbitMQ concurrently with a bounded timeout and returns HTTP `503` when any required dependency is unavailable.
-
-Tenant operations require `operations:read`:
+Tenant diagnostics require `operations:read`:
 
 ```text
 GET /api/v1/operations/snapshot
@@ -354,50 +295,57 @@ GET /api/v1/operations/snapshot
 
 The snapshot exposes counters only: message status, traffic class, campaign status, recipient status, and tenant-owned transactional-outbox backlog. It does not return phone numbers, contact IDs, message bodies, provider payloads, or credentials.
 
+## Metrics, correlation, and alerting
+
+Release `0.13.0` adds Prometheus-compatible metrics and W3C trace/request correlation without adding a new observability SDK to the runtime dependency graph.
+
+Metrics endpoint:
+
+```text
+GET /api/metrics
+Authorization: Bearer <METRICS_BEARER_TOKEN>
+```
+
+`METRICS_BEARER_TOKEN` must contain at least 32 characters. When it is missing or too short, the endpoint fails closed with HTTP `503`. This token is independent of tenant API keys and Meta credentials.
+
+Exported telemetry includes:
+
+- process uptime and memory;
+- HTTP request totals and duration histograms;
+- messages by current status;
+- campaigns and campaign recipients by status;
+- transactional outbox pending/due/leased/oldest age;
+- durable webhook pending/due/leased/oldest age.
+
+HTTP metric labels are intentionally limited to `method`, `controller`, `handler`, and `status_code`. Raw URLs, tenant IDs, phone numbers, message IDs, campaign IDs, error text, and user-provided strings are not used as Prometheus labels.
+
+Incoming valid W3C `traceparent` headers are continued with a new server span ID. Responses include the current `traceparent` and a bounded `x-request-id`. For newly-created outbound messages, the correlation carrier is persisted in the existing outbox JSON and propagated through RabbitMQ publish/retry/DLQ before a new worker span is created. Legacy messages without trace metadata continue to work.
+
+`0.13.0` provides trace correlation and W3C-compatible propagation; it does **not** yet export spans to an OpenTelemetry/Jaeger/Tempo/Datadog-style tracing backend.
+
+Operational details:
+
+- `docs/observability.md` — scrape, correlation, cardinality, security, and dashboard runbook
+- `ops/prometheus-alerts.yml` — baseline alert rules for target down, stalled outbox, stalled webhooks, and elevated HTTP 5xx rate
+
 ## Supply-chain and build reproducibility
 
-Release `0.12.0` introduces a committed npm lockfile and deterministic installation policy.
+The repository uses a committed npm lockfile and deterministic installation policy.
 
-Development/CI installation:
+Development/CI:
 
 ```bash
 npm ci
 ```
 
-Production runtime installation:
+Production runtime:
 
 ```bash
 npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts
 npm run audit:prod
 ```
 
-Security policy:
-
-- `package-lock.json` is committed and CI uses `npm ci`;
-- the production image is built from the same lockfile;
-- development, optional, and peer tooling are omitted from the production runtime image;
-- the CI runtime-security job fails when a high or critical advisory affects a package physically installed in the production runtime tree;
-- lockfile-only advisories for omitted development/peer/optional tooling do not cause a false production failure;
-- vulnerable transitive `multer` versions are overridden to `2.3.0` until upstream dependency constraints no longer require the override;
-- a production Docker image build is a CI gate.
-
-The runtime security check does not suppress an installed vulnerability. It distinguishes the actual production dependency tree from packages that remain represented in the npm lockfile but are intentionally omitted from the production installation.
-
-## Reliability defaults
-
-- Transactional outbox
-- Durable RabbitMQ queues
-- Retry delays: `5s -> 30s -> 2m -> 10m -> DLQ`
-- Per-message processing leases
-- Per-sender Redis rate limiting
-- Traffic-class-specific consumers
-- Campaign recipient leases with expired-claim recovery
-- Deterministic campaign message idempotency
-- Conditional campaign lifecycle transitions
-- Durable signed webhook ingestion and retry
-- Explicit liveness/readiness separation
-- Reproducible dependency installation
-- Production runtime vulnerability gate
+CI fails when a high or critical advisory affects a package physically installed in the production runtime tree. The production Docker image is built from the same lockfile and Docker construction is a merge gate.
 
 ## Production build
 
@@ -429,6 +377,7 @@ REDIS_URL
 RABBITMQ_URL
 API_KEY_HASH_SECRET
 HEALTH_DEPENDENCY_TIMEOUT_MS
+METRICS_BEARER_TOKEN
 META_GRAPH_API_VERSION
 META_APP_SECRET
 META_WEBHOOK_VERIFY_TOKEN
@@ -452,7 +401,7 @@ Never commit production credentials or access tokens.
 
 ## Next implementation slices
 
-- distributed tracing, metrics export, and alerting
+- OpenTelemetry span export and tracing-backend integration
 - integration and load tests
 - additional administrative audit coverage
 - provider-backed secret stores beyond environment references
