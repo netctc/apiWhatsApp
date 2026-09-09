@@ -182,6 +182,7 @@ model Contact {
   name                   String?
   language               String?
   timezone               String?
+  tags                   String[]            @default([])
   consentStatus          ConsentStatus       @default(UNKNOWN)
   consentSource          String?
   consentAt              DateTime?
@@ -198,6 +199,7 @@ model Contact {
   @@unique([tenantId, phone])
   @@index([tenantId, consentStatus, createdAt])
   @@index([tenantId, serviceWindowExpiresAt])
+  @@index([tags], type: Gin)
 }
 
 model ContactConsentEvent {
