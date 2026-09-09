@@ -2,6 +2,7 @@ import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from "@ne
 import { Prisma, WebhookEvent } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { InboundMessageService } from "./inbound-message.service.js";
+import { TemplateStatusWebhookService } from "./template-status-webhook.service.js";
 import { WebhookStatusService } from "./webhook-status.service.js";
 
 @Injectable()
@@ -13,6 +14,7 @@ export class WebhookEventProcessorService implements OnApplicationBootstrap, OnM
   constructor(
     private readonly prisma: PrismaService,
     private readonly inboundMessageService: InboundMessageService,
+    private readonly templateStatusService: TemplateStatusWebhookService,
     private readonly statusService: WebhookStatusService,
   ) {}
 
@@ -42,6 +44,7 @@ export class WebhookEventProcessorService implements OnApplicationBootstrap, OnM
       for (const event of events) {
         try {
           await this.inboundMessageService.process(event.payload);
+          await this.templateStatusService.process(event.payload);
           await this.statusService.processWebhookEvent(event.id, event.payload);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
