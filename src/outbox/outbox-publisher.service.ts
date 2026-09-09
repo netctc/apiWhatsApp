@@ -106,11 +106,12 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
         );
       }
 
-      await this.queue.publishOutboundMessage(
-        messageId,
-        persistedTrafficClass,
-        this.extractTrace(payload),
-      );
+      const trace = this.extractTrace(payload);
+      if (trace) {
+        await this.queue.publishOutboundMessage(messageId, persistedTrafficClass, trace);
+      } else {
+        await this.queue.publishOutboundMessage(messageId, persistedTrafficClass);
+      }
 
       await this.prisma.outboxEvent.update({
         where: { id: eventId },
