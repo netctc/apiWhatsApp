@@ -52,11 +52,18 @@ export class MessageDispatcherService {
       return { action: "retry", reason: "Claimed message could not be reloaded" };
     }
 
+    if (message.trafficClass !== job.trafficClass) {
+      const reason =
+        `Queue traffic class ${job.trafficClass} does not match persisted class ${message.trafficClass}`;
+      await this.markFailed(message.id, "QUEUE_TRAFFIC_CLASS_MISMATCH", reason);
+      return { action: "dead", reason };
+    }
+
     await this.prisma.messageStatusEvent.create({
       data: {
         messageId: message.id,
         status: MessageStatus.PROCESSING,
-        payload: { queueAttempt: job.attempt + 1 },
+        payload: { queueAttempt: job.attempt + 1, trafficClass: message.trafficClass },
       },
     });
 
@@ -70,7 +77,11 @@ export class MessageDispatcherService {
     }
 
     try {
-      await this.rateLimiter.waitForOutboundSlot(sender.phoneNumberId, sender.rateLimitPerSecond);
+      await this.rateLimiter.waitForOutboundSlot(
+        sender.phoneNumberId,
+        message.trafficClass,
+        sender.rateLimitPerSecond,
+      );
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Rate limiter unavailable";
       await this.markRetryableFailure(message.id, "RATE_LIMITER_UNAVAILABLE", reason, job.attempt);

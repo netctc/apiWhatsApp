@@ -23,6 +23,12 @@ enum MessageDirection {
   OUTBOUND
 }
 
+enum MessageTrafficClass {
+  OTP
+  TRANSACTIONAL
+  MARKETING
+}
+
 enum MessageStatus {
   CREATED
   RECEIVED
@@ -191,6 +197,7 @@ model Message {
   tenantId             String?              @db.Uuid
   senderId             String?              @db.Uuid
   direction            MessageDirection
+  trafficClass         MessageTrafficClass  @default(TRANSACTIONAL)
   type                 MessageType
   status               MessageStatus        @default(CREATED)
   to                   String?
@@ -219,6 +226,8 @@ model Message {
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, createdAt])
   @@index([tenantId, senderId, createdAt])
+  @@index([tenantId, trafficClass, createdAt])
+  @@index([trafficClass, status, processingLeaseUntil, createdAt])
   @@index([status, processingLeaseUntil, createdAt])
   @@index([to, createdAt])
 }

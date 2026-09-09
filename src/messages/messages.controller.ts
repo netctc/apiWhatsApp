@@ -50,6 +50,7 @@ export class MessagesController {
     return {
       messageId: message.id,
       status: message.status,
+      trafficClass: message.trafficClass,
       createdAt: message.createdAt,
     };
   }

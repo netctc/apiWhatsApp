@@ -1,31 +1,25 @@
 # apiWhatsApp
 
-Enterprise-grade, multi-tenant WhatsApp Business Platform API built for reliable high-volume messaging through Meta Cloud API.
+Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.5.0
+## Current release: 0.6.0
 
 The platform currently provides:
 
 - NestJS + TypeScript REST API
 - PostgreSQL + Prisma persistence
 - Tenant isolation with scoped API keys
-- API key creation, delegation, listing, and revocation
-- Append-only tenant administrative audit log
-- Contacts and immutable consent history
+- API key lifecycle and append-only tenant audit logs
+- Contacts, consent history, and 24-hour customer service windows
 - Multiple WhatsApp senders per tenant
 - Runtime secret references instead of raw Meta tokens in PostgreSQL
-- Tenant/WABA message-template synchronization and status tracking
-- Local enforcement that outbound templates are synchronized and `APPROVED`
-- Durable `message_template_status_update` webhook processing
+- WABA template synchronization and lifecycle status tracking
+- Local `APPROVED` template enforcement before outbox creation
+- Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
+- Isolated RabbitMQ queues/retries/DLQs and consumer prefetch per traffic class
+- Priority-aware Redis sender capacity reservation with late-window borrowing
 - Transactional outbox
-- RabbitMQ workers with delayed retries and DLQ
-- Redis per-phone-number distributed rate limiting
-- Text and template outbound messages
-- Tenant-scoped idempotency
-- Inbound WhatsApp message persistence
-- Automatic contact upsert from inbound messages
-- 24-hour customer service window enforcement
-- Signed Meta webhook verification
+- Inbound message persistence and signed Meta webhooks
 - Delivery status processing (`sent`, `delivered`, `read`, `failed`)
 - Cursor-paginated message, template, and audit APIs
 - OpenAPI / Swagger
@@ -39,25 +33,24 @@ flowchart LR
     Client[CRM / ERP / Application] --> Auth[X-API-Key]
     Auth --> API[REST API]
     API --> DB[(PostgreSQL)]
-    DB --> Outbox[Outbox Publisher]
-    Outbox --> MQ[(RabbitMQ)]
-    MQ --> Worker[Outbound Worker]
-    Worker --> Sender[Sender Resolver]
-    Sender --> Secrets[Runtime Secrets]
-    Worker --> Rate[Redis Rate Limiter]
+    DB --> Outbox[Transactional Outbox]
+    Outbox --> Router[Traffic Router]
+    Router --> OTP[(RabbitMQ OTP)]
+    Router --> TX[(RabbitMQ Transactional)]
+    Router --> MKT[(RabbitMQ Marketing)]
+    OTP --> Worker[Outbound Worker]
+    TX --> Worker
+    MKT --> Worker
+    Worker --> Rate[Redis Sender Capacity]
     Rate --> Meta[Meta Cloud API]
     Meta --> WA[WhatsApp]
     Meta --> Webhook[Signed Webhook]
     Webhook --> DB
     DB --> Processor[Webhook Processor]
     Processor --> DB
-    API --> TemplateSync[Template Sync]
-    TemplateSync --> Meta
 ```
 
-Outbound HTTP requests do not wait for WhatsApp delivery. The message and queue intent are committed atomically in PostgreSQL and delivered asynchronously.
-
-Inbound and template-status webhook requests are signature-verified and durably persisted before asynchronous processing.
+Outbound HTTP requests never wait for WhatsApp delivery. A message and its outbox intent are committed atomically, then published to the queue selected from the persisted server-derived traffic class.
 
 ## Requirements
 
@@ -66,7 +59,7 @@ Inbound and template-status webhook requests are signature-verified and durably 
 - Docker and Docker Compose
 - Meta application with WhatsApp Business Platform access
 - One or more WhatsApp Business phone numbers
-- WABA ID configured on each sender that will use templates
+- WABA ID configured for senders that use templates
 - Meta access token for every configured sender
 - Meta app secret and webhook verify token
 
@@ -78,29 +71,19 @@ docker compose up -d
 npm install
 npm run prisma:generate
 npm run prisma:deploy
-```
-
-Provision the initial tenant/admin key:
-
-```bash
 npm run bootstrap:tenant -- --name="Acme" --slug=acme --key-name=bootstrap
 ```
 
-The raw API key is printed once. Only an HMAC-SHA256 digest is stored in PostgreSQL.
+The bootstrap command prints the raw API key once. PostgreSQL stores only its HMAC-SHA256 digest.
 
-Start the API:
+Run API and worker in separate processes:
 
 ```bash
 npm run start:dev
-```
-
-Start the worker in another process:
-
-```bash
 npm run start:worker:dev
 ```
 
-API base URL: `http://localhost:3000/api`
+API: `http://localhost:3000/api`
 
 Swagger: `http://localhost:3000/docs`
 
@@ -112,9 +95,7 @@ Business endpoints require:
 X-API-Key: wapi_<prefix>_<secret>
 ```
 
-Tenant identity is derived exclusively from the API key. Clients cannot provide or override `tenantId`.
-
-Supported scopes:
+Tenant identity comes exclusively from the authenticated key. Supported scopes:
 
 ```text
 messages:read
@@ -130,9 +111,7 @@ api_keys:write
 audit:read
 ```
 
-The bootstrap command creates a full administrative key. Use the lifecycle API to create narrower keys for applications and integrations.
-
-## API key lifecycle
+API key lifecycle:
 
 ```text
 POST /api/v1/api-keys
@@ -141,37 +120,23 @@ POST /api/v1/api-keys/{apiKeyId}/revoke
 GET  /api/v1/audit-logs
 ```
 
-Raw API keys are returned only at creation time. List responses and audit metadata never expose raw secrets or `keyHash` values. A delegated key cannot grant scopes it does not itself hold.
+A delegated key cannot grant scopes the actor key does not hold. Raw keys and key hashes are excluded from list/audit responses.
 
-## WhatsApp phone numbers / senders
+## WhatsApp senders
 
-Store each Meta access token in the runtime environment or deployment secret manager:
-
-```text
-META_ACME_WHATSAPP_TOKEN=<meta-access-token>
-```
-
-Register the sender using a secret reference:
-
-```http
-POST /api/v1/phone-numbers
-```
+Register sender metadata with a runtime credential reference:
 
 ```json
 {
   "providerPhoneNumberId": "27681414235104944",
   "wabaId": "8856996819413533",
-  "displayPhoneNumber": "16505553333",
-  "verifiedName": "Acme Support",
   "credentialRef": "env:META_ACME_WHATSAPP_TOKEN",
   "rateLimitPerSecond": 75,
   "isDefault": true
 }
 ```
 
-The raw Meta token is never persisted in PostgreSQL. A WABA cannot be assigned to multiple tenants through sender configuration.
-
-Sender endpoints:
+The referenced Meta token is never stored in PostgreSQL.
 
 ```text
 POST  /api/v1/phone-numbers
@@ -180,92 +145,68 @@ GET   /api/v1/phone-numbers/{senderId}
 PATCH /api/v1/phone-numbers/{senderId}
 ```
 
-## Message template lifecycle
+## Template lifecycle
 
-Templates are synchronized at WABA level. The sync endpoint resolves the WABA and its Meta credential from a tenant sender; callers do not submit an access token.
-
-### Synchronize templates
-
-```http
+```text
 POST /api/v1/templates/sync
-X-API-Key: <key-with-templates:write>
-Content-Type: application/json
+GET  /api/v1/templates
+GET  /api/v1/templates/{templateId}
 ```
 
-Use the active default sender:
+Templates are synchronized at WABA level through the selected/default tenant sender. The complete remote catalog is read before local changes are applied. Malformed/incomplete pagination aborts synchronization rather than marking missing rows deleted.
 
-```json
-{}
-```
+Meta `message_template_status_update` webhook events update the local lifecycle state. New template messages require an exact local `name + language + WABA` match with status `APPROVED`.
 
-Or choose a specific tenant sender/WABA:
+## Traffic classes and priority routing
 
-```json
-{
-  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d"
-}
-```
+Clients do **not** submit a priority field. The server derives `MessageTrafficClass` from trusted local metadata:
 
-The service reads all pages from Meta before modifying the local catalog. If remote pagination is incomplete or an API request fails, the sync is aborted. After a successful complete sync, local templates missing remotely are marked `DELETED` rather than physically removed.
+| Message/template source | Persisted traffic class |
+| --- | --- |
+| Approved `AUTHENTICATION` template | `OTP` |
+| Approved `MARKETING` template | `MARKETING` |
+| `UTILITY` or other approved template | `TRANSACTIONAL` |
+| Free-form `TEXT` service reply | `TRANSACTIONAL` |
 
-### List templates
+This prevents a marketing integration from self-labeling traffic as OTP.
 
-```http
-GET /api/v1/templates?status=APPROVED&language=en_US&limit=50
-X-API-Key: <key-with-templates:read>
-```
+The class is persisted on `Message`, copied into the transactional outbox intent, and verified again by the worker. A RabbitMQ job whose queue class differs from the persisted message class is failed and dead-lettered before calling Meta.
 
-Supported filters:
+### RabbitMQ topology
+
+With the default base queue `whatsapp.outbound`, the release uses:
 
 ```text
-wabaId=<Meta WABA ID>
-status=<provider status>
-category=<provider category>
-language=<language code>
-name=<case-insensitive name search>
-cursor=<template UUID>
-limit=1..100
+whatsapp.outbound.otp
+whatsapp.outbound.transactional
+whatsapp.outbound.marketing
 ```
 
-Get one template:
-
-```http
-GET /api/v1/templates/{templateId}
-```
-
-Template status is stored as a normalized string rather than a database enum so new Meta lifecycle states can be persisted without an emergency schema change.
-
-### Template status webhooks
-
-The durable webhook processor handles Meta `message_template_status_update` events. `entry.id` is treated as the WABA ID and must resolve unambiguously to one configured tenant. Unknown or cross-tenant-ambiguous WABAs fail closed and the raw webhook remains retryable.
-
-Status events update the local template immediately, including rejection reason when supplied. This keeps `APPROVED`, `REJECTED`, `DISABLED`, `DELETED`, and future provider statuses aligned without requiring a manual sync after every lifecycle transition.
-
-### Outbound template enforcement
-
-A new `TEMPLATE` message must satisfy all of the following before an outbox event is created:
-
-1. The contact satisfies the existing template consent policy.
-2. The selected sender is active and has a WABA ID.
-3. The template `name + language` exists for that tenant/WABA.
-4. The local template status is exactly `APPROVED`.
-
-An idempotent retry of an already-created logical message still returns the existing message before re-evaluating current template state.
-
-## Contacts, consent, and service window
+Each class has independent retry queues and a DLQ. The worker uses a dedicated consumer channel/prefetch for each class:
 
 ```text
-POST  /api/v1/contacts
-GET   /api/v1/contacts
-GET   /api/v1/contacts/{contactId}
-PATCH /api/v1/contacts/{contactId}
-POST  /api/v1/contacts/{contactId}/consents
-GET   /api/v1/contacts/{contactId}/consents
+OUTBOUND_WORKER_PREFETCH_OTP=10
+OUTBOUND_WORKER_PREFETCH_TRANSACTIONAL=20
+OUTBOUND_WORKER_PREFETCH_MARKETING=5
 ```
 
-Consent events are retained as an immutable history. Template messages require explicit `OPTED_IN` consent.
+The legacy `whatsapp.outbound` queue remains consumed as `TRANSACTIONAL` so pre-0.6 messages and legacy retry queues can drain safely during rollout.
 
-An inbound user message opens or extends the contact service window to 24 hours after that user message. Free-form `TEXT` messages require an open service window; outside it, use an approved `TEMPLATE` message.
+### Priority-aware sender capacity
+
+All traffic still shares the configured per-phone-number total rate limit. During the first part of every one-second Redis window, lower classes are capped to preserve high-priority headroom:
+
+```text
+OUTBOUND_PRIORITY_RESERVATION_WINDOW_MS=700
+OUTBOUND_TRANSACTIONAL_MAX_SHARE=0.60
+OUTBOUND_MARKETING_MAX_SHARE=0.20
+```
+
+With the defaults, the first 700 ms reserves at least 20% total headroom for OTP. During the final 300 ms, any class may borrow unused total capacity so throughput is not unnecessarily discarded.
+
+The total Redis counter deliberately retains the pre-0.6 key format. Old and new workers therefore enforce one shared sender limit during a rolling deployment instead of accidentally doubling throughput.
+
+Custom transactional + marketing shares above 90% are rejected in favor of the safe defaults so the reservation phase always keeps OTP headroom.
 
 ## Messaging API
 
@@ -276,18 +217,6 @@ POST /api/v1/messages
 X-API-Key: <tenant-api-key>
 Idempotency-Key: order-48291-confirmation
 Content-Type: application/json
-```
-
-Free-form example:
-
-```json
-{
-  "to": "+96170123456",
-  "type": "TEXT",
-  "payload": {
-    "body": "Thanks. We are checking your request now."
-  }
-}
 ```
 
 Template example:
@@ -305,14 +234,16 @@ Template example:
 }
 ```
 
-`senderId` is optional. When omitted, the tenant active default sender is used.
+Free-form text is allowed only inside the contact's open 24-hour customer service window. Template messages require explicit `OPTED_IN` consent and an approved synchronized template.
 
-List and read:
+List/read:
 
 ```text
 GET /api/v1/messages
 GET /api/v1/messages/{messageId}
 ```
+
+`GET /api/v1/messages` can filter by `trafficClass=OTP|TRANSACTIONAL|MARKETING` in addition to the existing direction/status/phone/sender filters.
 
 Outbound lifecycle:
 
@@ -322,9 +253,7 @@ QUEUED -> PROCESSING -> SUBMITTED -> SENT -> DELIVERED -> READ
                                -> FAILED
 ```
 
-Inbound messages enter as `RECEIVED`.
-
-## Meta webhook
+## Webhooks
 
 Configure Meta to use:
 
@@ -340,15 +269,17 @@ Processing path:
 verify signature -> persist raw event -> HTTP 200 -> process asynchronously
 ```
 
-The processor handles inbound messages, outbound delivery statuses, and message-template status updates before marking the durable webhook event processed.
+The durable processor handles inbound messages, outbound delivery receipts, and template lifecycle updates before marking a webhook event processed.
 
-## Reliability
+## Reliability defaults
 
-- Transactional outbox keeps message creation and queue intent atomic.
-- RabbitMQ delayed retries default to `5s -> 30s -> 2m -> 10m -> DLQ`.
-- Redis rate limits outbound traffic per Meta `phone_number_id`.
-- Webhook processing uses leases and exponential retry scheduling.
-- Template sync never applies a partial remote catalog.
+- Transactional outbox for queue intent
+- Retry delays: `5s -> 30s -> 2m -> 10m -> DLQ`
+- Per-message processing leases
+- Per-sender Redis rate limiting
+- Class-specific RabbitMQ consumer channels
+- Legacy queue draining during 0.6 rollout
+- Durable webhook ingestion/retry
 
 ## Production commands
 
@@ -378,17 +309,22 @@ META_WEBHOOK_VERIFY_TOKEN
 META_HTTP_TIMEOUT_MS
 OUTBOUND_RETRY_DELAYS_MS
 DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND
+OUTBOUND_WORKER_PREFETCH_OTP
+OUTBOUND_WORKER_PREFETCH_TRANSACTIONAL
+OUTBOUND_WORKER_PREFETCH_MARKETING
+OUTBOUND_PRIORITY_RESERVATION_WINDOW_MS
+OUTBOUND_TRANSACTIONAL_MAX_SHARE
+OUTBOUND_MARKETING_MAX_SHARE
 ```
 
-Tenant sender tokens are referenced by configured `env:VARIABLE_NAME` values. Never commit production credentials or tokens.
+Never commit production credentials or tokens.
 
 ## Next implementation slices
 
+- campaign orchestration and segmentation on top of `MARKETING` traffic
 - audit coverage for additional administrative configuration actions
 - provider-backed secret stores beyond environment references
 - media messages and media storage
-- priority queues for OTP / transactional / marketing traffic
-- campaign orchestration and segmentation
 - agent inbox / conversation assignment
 - observability, readiness, tracing, and alerting
 - integration and load tests

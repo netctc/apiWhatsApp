@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from "@nestjs/common";
-import { OutboxEvent, Prisma } from "../generated/prisma/client.js";
+import { MessageTrafficClass, OutboxEvent, Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { MessagingQueueService } from "../queue/messaging-queue.service.js";
 
@@ -87,7 +87,15 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
       }
 
       const messageId = this.extractMessageId(payload) ?? aggregateId;
-      await this.queue.publishOutboundMessage(messageId);
+      const persistedTrafficClass = await this.lookupTrafficClass(messageId);
+      const payloadTrafficClass = this.extractTrafficClass(payload);
+      if (payloadTrafficClass && payloadTrafficClass !== persistedTrafficClass) {
+        throw new Error(
+          `Outbox traffic class ${payloadTrafficClass} does not match persisted message class ${persistedTrafficClass}`,
+        );
+      }
+
+      await this.queue.publishOutboundMessage(messageId, persistedTrafficClass);
 
       await this.prisma.outboxEvent.update({
         where: { id: eventId },
@@ -121,5 +129,31 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
 
     const messageId = (payload as { messageId?: unknown }).messageId;
     return typeof messageId === "string" && messageId.length > 0 ? messageId : undefined;
+  }
+
+  private extractTrafficClass(payload: unknown): MessageTrafficClass | undefined {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return undefined;
+    }
+    const value = (payload as { trafficClass?: unknown }).trafficClass;
+    switch (value) {
+      case MessageTrafficClass.OTP:
+      case MessageTrafficClass.TRANSACTIONAL:
+      case MessageTrafficClass.MARKETING:
+        return value;
+      default:
+        return undefined;
+    }
+  }
+
+  private async lookupTrafficClass(messageId: string): Promise<MessageTrafficClass> {
+    const message = await this.prisma.message.findUnique({
+      where: { id: messageId },
+      select: { trafficClass: true },
+    });
+    if (!message) {
+      throw new Error(`Outbound message ${messageId} no longer exists`);
+    }
+    return message.trafficClass;
   }
 }
