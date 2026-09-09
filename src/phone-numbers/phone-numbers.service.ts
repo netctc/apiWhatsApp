@@ -15,6 +15,7 @@ export class PhoneNumbersService {
     if (providerConflict) {
       throw new ConflictException("This Meta phone_number_id is already registered");
     }
+    await this.assertWabaOwnership(tenantId, dto.wabaId);
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
@@ -70,6 +71,8 @@ export class PhoneNumbersService {
   }
 
   async update(tenantId: string, id: string, dto: UpdatePhoneNumberDto) {
+    await this.assertWabaOwnership(tenantId, dto.wabaId);
+
     return this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.whatsAppPhoneNumber.findFirst({
         where: { id, tenantId },
@@ -140,6 +143,14 @@ export class PhoneNumbersService {
     return sender;
   }
 
+  async resolveWabaForTenant(tenantId: string, senderId?: string) {
+    const sender = await this.resolveForTenant(tenantId, senderId);
+    if (!sender.wabaId) {
+      throw new UnprocessableEntityException("The selected WhatsApp sender is missing its WABA ID");
+    }
+    return { sender, wabaId: sender.wabaId };
+  }
+
   async findActiveById(id: string) {
     const sender = await this.prisma.whatsAppPhoneNumber.findFirst({
       where: { id, active: true },
@@ -158,5 +169,37 @@ export class PhoneNumbersService {
       throw new UnprocessableEntityException(`Unconfigured Meta phone_number_id ${providerPhoneNumberId}`);
     }
     return sender;
+  }
+
+  async findTenantIdByWabaId(wabaId: string): Promise<string> {
+    const rows = await this.prisma.whatsAppPhoneNumber.findMany({
+      where: { wabaId },
+      select: { tenantId: true },
+    });
+    const owners = [...new Set(rows.map((row) => row.tenantId))];
+    if (owners.length === 0) {
+      throw new UnprocessableEntityException(`Unconfigured WABA ${wabaId}`);
+    }
+    if (owners.length > 1) {
+      throw new UnprocessableEntityException(`WABA ${wabaId} is ambiguously assigned to multiple tenants`);
+    }
+    return owners[0]!;
+  }
+
+  private async assertWabaOwnership(tenantId: string, wabaId?: string): Promise<void> {
+    if (!wabaId) {
+      return;
+    }
+
+    const conflict = await this.prisma.whatsAppPhoneNumber.findFirst({
+      where: {
+        wabaId,
+        tenantId: { not: tenantId },
+      },
+      select: { tenantId: true },
+    });
+    if (conflict) {
+      throw new ConflictException("This WABA is already associated with another tenant");
+    }
   }
 }

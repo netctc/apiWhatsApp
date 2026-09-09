@@ -1,8 +1,9 @@
-import { BadRequestException, ConflictException, Injectable } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, UnprocessableEntityException } from "@nestjs/common";
 import { normalizePhoneNumber } from "../contacts/phone.util.js";
 import { MessageDirection, MessageStatus, MessageType, Prisma } from "../generated/prisma/client.js";
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { TemplatesService } from "../templates/templates.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
 import { ListMessagesQueryDto } from "./dto/list-messages-query.dto.js";
 import { OutboundPolicyService } from "./outbound-policy.service.js";
@@ -15,6 +16,7 @@ export class MessagesService {
     private readonly prisma: PrismaService,
     private readonly outboundPolicy: OutboundPolicyService,
     private readonly phoneNumbers: PhoneNumbersService,
+    private readonly templates: TemplatesService,
   ) {}
 
   async create(tenantId: string, dto: CreateMessageDto) {
@@ -31,6 +33,13 @@ export class MessagesService {
     await this.outboundPolicy.assertAllowed(tenantId, dto.to, dto.type);
     const normalizedTo = normalizePhoneNumber(dto.to);
     const sender = await this.phoneNumbers.resolveForTenant(tenantId, dto.senderId);
+
+    if (dto.type === OutboundMessageType.TEMPLATE) {
+      if (!sender.wabaId) {
+        throw new UnprocessableEntityException("The selected WhatsApp sender is missing its WABA ID");
+      }
+      await this.templates.assertApproved(tenantId, sender.wabaId, dto.payload);
+    }
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
