@@ -129,12 +129,13 @@ describe("CampaignsService", () => {
     });
   });
 
-  it("rejects unsupported personalization before resolving the sender", async () => {
+  it("rejects unsupported personalization before resolving the sender when personalization is enabled", async () => {
     await expect(
       service.create(TENANT_ID, {
         name: "Promo",
         templateId: TEMPLATE_ID,
         audience: { allOptedIn: true },
+        personalizationEnabled: true,
         components: [
           {
             type: "body",
@@ -146,6 +147,55 @@ describe("CampaignsService", () => {
 
     expect(resolveForTenant).not.toHaveBeenCalled();
     expect(campaignCreate).not.toHaveBeenCalled();
+  });
+
+  it("keeps component strings static when personalization is not enabled", async () => {
+    const components = [
+      {
+        type: "body",
+        parameters: [{ type: "text", text: "Hello {{contact.name}}" }],
+      },
+    ];
+
+    await service.create(TENANT_ID, {
+      name: "Static braces",
+      templateId: TEMPLATE_ID,
+      audience: { allOptedIn: true },
+      components,
+    });
+
+    expect(campaignCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        audience: { allOptedIn: true },
+        components,
+      }),
+      include: expect.any(Object),
+    });
+  });
+
+  it("persists personalization opt-in only when explicitly enabled", async () => {
+    await service.create(TENANT_ID, {
+      name: "Personalized promo",
+      templateId: TEMPLATE_ID,
+      audience: { allOptedIn: true },
+      personalizationEnabled: true,
+      components: [
+        {
+          type: "body",
+          parameters: [{ type: "text", text: "{{contact.name}}" }],
+        },
+      ],
+    });
+
+    expect(campaignCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        audience: {
+          allOptedIn: true,
+          personalizationEnabled: true,
+        },
+      }),
+      include: expect.any(Object),
+    });
   });
 
   it("terminalizes pending recipients only when the campaign actually transitions to FAILED", async () => {
