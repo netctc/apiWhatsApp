@@ -10,7 +10,6 @@ import {
   CampaignRecipient,
   CampaignRecipientStatus,
   CampaignStatus,
-  ConsentStatus,
   Prisma,
 } from "../generated/prisma/client.js";
 import { OutboundMessageType } from "../messages/dto/create-message.dto.js";
@@ -168,14 +167,6 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
       } else {
         await this.completeForCurrentCampaignState(claim, campaign.id, configurationError);
       }
-      return;
-    }
-
-    if (recipient.contact.consentStatus !== ConsentStatus.OPTED_IN) {
-      await this.completeClaim(claim, {
-        status: CampaignRecipientStatus.SKIPPED,
-        lastError: "Contact is no longer opted in at campaign processing time",
-      });
       return;
     }
 
