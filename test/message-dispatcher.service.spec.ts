@@ -1,5 +1,5 @@
 import { jest } from "@jest/globals";
-import { MessageStatus, MessageType } from "../src/generated/prisma/client.js";
+import { MessageStatus, MessageTrafficClass, MessageType } from "../src/generated/prisma/client.js";
 import { MetaSenderResolverService } from "../src/meta/meta-sender-resolver.service.js";
 import { MetaWhatsAppClient } from "../src/meta/meta-whatsapp.client.js";
 import { PrismaService } from "../src/prisma/prisma.service.js";
@@ -65,6 +65,7 @@ describe("MessageDispatcherService", () => {
     const result = await service.dispatch({
       messageId: "fcddeed9-3bcc-4e47-a44c-95179141779a",
       attempt: 0,
+      trafficClass: MessageTrafficClass.TRANSACTIONAL,
     });
 
     expect(result).toEqual({
@@ -82,6 +83,7 @@ describe("MessageDispatcherService", () => {
       tenantId: "123e4567-e89b-12d3-a456-426614174000",
       senderId: "ac91b20f-a54f-4a74-8c87-c09e8a5a3ba5",
       direction: "OUTBOUND",
+      trafficClass: MessageTrafficClass.TRANSACTIONAL,
       type: MessageType.TEXT,
       status: MessageStatus.PROCESSING,
       to: "+96170123456",
@@ -122,11 +124,16 @@ describe("MessageDispatcherService", () => {
     const result = await service.dispatch({
       messageId: message.id,
       attempt: 0,
+      trafficClass: MessageTrafficClass.TRANSACTIONAL,
     });
 
     expect(result).toEqual({ action: "ack" });
     expect(resolveSender).toHaveBeenCalledWith(message.senderId);
-    expect(waitForOutboundSlot).toHaveBeenCalledWith(sender.phoneNumberId, 75);
+    expect(waitForOutboundSlot).toHaveBeenCalledWith(
+      sender.phoneNumberId,
+      MessageTrafficClass.TRANSACTIONAL,
+      75,
+    );
     expect(metaSendMessage).toHaveBeenCalledWith(message, sender);
     expect(messageUpdate).toHaveBeenCalledWith({
       where: { id: message.id },
@@ -136,5 +143,34 @@ describe("MessageDispatcherService", () => {
         processingLeaseUntil: null,
       }),
     });
+  });
+
+  it("dead-letters a job whose queue class does not match the persisted message", async () => {
+    messageUpdateMany.mockResolvedValue({ count: 1 });
+    messageFindUnique.mockResolvedValue({
+      id: "0b572713-6bda-4c85-9918-5ebf497f23bc",
+      status: MessageStatus.PROCESSING,
+      trafficClass: MessageTrafficClass.MARKETING,
+      providerMessageId: null,
+      processingLeaseUntil: new Date(Date.now() + 30000),
+    });
+
+    const result = await service.dispatch({
+      messageId: "0b572713-6bda-4c85-9918-5ebf497f23bc",
+      attempt: 0,
+      trafficClass: MessageTrafficClass.OTP,
+    });
+
+    expect(result.action).toBe("dead");
+    expect(messageUpdate).toHaveBeenCalledWith({
+      where: { id: "0b572713-6bda-4c85-9918-5ebf497f23bc" },
+      data: expect.objectContaining({
+        status: MessageStatus.FAILED,
+        errorCode: "QUEUE_TRAFFIC_CLASS_MISMATCH",
+      }),
+    });
+    expect(resolveSender).not.toHaveBeenCalled();
+    expect(waitForOutboundSlot).not.toHaveBeenCalled();
+    expect(metaSendMessage).not.toHaveBeenCalled();
   });
 });
