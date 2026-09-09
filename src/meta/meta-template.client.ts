@@ -54,13 +54,25 @@ export class MetaTemplateClient {
       const responseBody = await this.getPage(url, context.accessToken);
       templates.push(...this.extractTemplates(responseBody));
 
-      const next = this.extractAfterCursor(responseBody);
-      if (!next || seenCursors.has(next)) {
+      const paging = this.extractPaging(responseBody);
+      if (!paging.hasNext) {
         completed = true;
         break;
       }
-      seenCursors.add(next);
-      after = next;
+      if (!paging.after) {
+        throw new MetaApiError("Meta template pagination advertised a next page without an after cursor", {
+          retryable: false,
+          response: responseBody,
+        });
+      }
+      if (seenCursors.has(paging.after)) {
+        throw new MetaApiError("Meta template pagination repeated an after cursor", {
+          retryable: false,
+          response: responseBody,
+        });
+      }
+      seenCursors.add(paging.after);
+      after = paging.after;
     }
 
     if (!completed) {
@@ -160,20 +172,25 @@ export class MetaTemplateClient {
     return result;
   }
 
-  private extractAfterCursor(value: unknown): string | undefined {
+  private extractPaging(value: unknown): { hasNext: boolean; after?: string } {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-      return undefined;
+      return { hasNext: false };
     }
     const paging = (value as { paging?: unknown }).paging;
     if (!paging || typeof paging !== "object" || Array.isArray(paging)) {
-      return undefined;
+      return { hasNext: false };
     }
-    const cursors = (paging as { cursors?: unknown }).cursors;
+    const pagingObject = paging as { next?: unknown; cursors?: unknown };
+    const hasNext = typeof pagingObject.next === "string" && pagingObject.next.length > 0;
+    const cursors = pagingObject.cursors;
     if (!cursors || typeof cursors !== "object" || Array.isArray(cursors)) {
-      return undefined;
+      return { hasNext };
     }
     const after = (cursors as { after?: unknown }).after;
-    return typeof after === "string" && after.length > 0 ? after : undefined;
+    return {
+      hasNext,
+      ...(typeof after === "string" && after.length > 0 ? { after } : {}),
+    };
   }
 
   private async readResponse(response: Response): Promise<unknown> {
