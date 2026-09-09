@@ -18,7 +18,6 @@ import { PrismaService } from "../prisma/prisma.service.js";
 import {
   CampaignPersonalizationTemplateError,
   CampaignPersonalizationValueError,
-  isCampaignPersonalizationEnabled,
   renderCampaignComponents,
 } from "./campaign-personalization.util.js";
 import { CampaignsService } from "./campaigns.service.js";
@@ -185,7 +184,7 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
 
     try {
       const components = Array.isArray(campaign.components)
-        ? isCampaignPersonalizationEnabled(campaign.audience)
+        ? campaign.personalizationEnabled
           ? this.renderComponents(campaign.components, recipient.contact)
           : campaign.components
         : undefined;
