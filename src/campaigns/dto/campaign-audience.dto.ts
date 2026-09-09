@@ -13,7 +13,7 @@ import {
 
 export class CampaignAudienceDto {
   @ApiPropertyOptional({
-    description: "Snapshot every currently opted-in tenant contact. Cannot be combined with contactIds.",
+    description: "Snapshot every currently opted-in tenant contact. Cannot be combined with contactIds or segmentId.",
     default: false,
   })
   @IsOptional()
@@ -21,7 +21,7 @@ export class CampaignAudienceDto {
   allOptedIn?: boolean;
 
   @ApiPropertyOptional({
-    description: "Explicit tenant contact UUIDs. Only contacts still opted in at launch are snapshotted.",
+    description: "Explicit tenant contact UUIDs. Cannot be combined with allOptedIn or segmentId.",
     type: [String],
   })
   @IsOptional()
@@ -31,7 +31,16 @@ export class CampaignAudienceDto {
   @IsUUID("4", { each: true })
   contactIds?: string[];
 
-  @ApiPropertyOptional({ description: "Optional exact contact language filter applied at launch." })
+  @ApiPropertyOptional({
+    description: "Active saved contact segment UUID. Its definition is copied into the campaign draft.",
+  })
+  @IsOptional()
+  @IsUUID("4")
+  segmentId?: string;
+
+  @ApiPropertyOptional({
+    description: "Optional exact contact language filter. Not accepted when segmentId is used.",
+  })
   @IsOptional()
   @IsString()
   @MaxLength(64)
@@ -39,7 +48,7 @@ export class CampaignAudienceDto {
 
   @ApiPropertyOptional({
     type: [String],
-    description: "Require at least one normalized contact tag from this set.",
+    description: "Require at least one normalized contact tag. Not accepted when segmentId is used.",
     example: ["vip", "renewal:2026"],
   })
   @IsOptional()
@@ -52,7 +61,7 @@ export class CampaignAudienceDto {
 
   @ApiPropertyOptional({
     type: [String],
-    description: "Require every normalized contact tag in this set.",
+    description: "Require every normalized contact tag. Not accepted when segmentId is used.",
     example: ["marketing", "vip"],
   })
   @IsOptional()
