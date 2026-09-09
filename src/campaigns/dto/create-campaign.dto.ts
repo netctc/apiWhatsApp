@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Type } from "class-transformer";
 import {
   IsArray,
+  IsDefined,
   IsISO8601,
   IsOptional,
   IsString,
@@ -29,6 +30,7 @@ export class CreateCampaignDto {
   templateId!: string;
 
   @ApiProperty({ type: CampaignAudienceDto })
+  @IsDefined()
   @ValidateNested()
   @Type(() => CampaignAudienceDto)
   audience!: CampaignAudienceDto;
