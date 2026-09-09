@@ -243,6 +243,7 @@ model Campaign {
   recipients          CampaignRecipient[]
 
   @@index([tenantId, status, scheduledAt, createdAt])
+  @@index([status, scheduledAt])
   @@index([tenantId, createdAt])
   @@index([senderId, status])
   @@index([templateId, status])
