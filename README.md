@@ -367,7 +367,7 @@ npm ci
 Production runtime installation:
 
 ```bash
-npm ci --omit=dev --omit=peer --ignore-scripts
+npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts
 npm run audit:prod
 ```
 
@@ -375,9 +375,9 @@ Security policy:
 
 - `package-lock.json` is committed and CI uses `npm ci`;
 - the production image is built from the same lockfile;
-- development and optional peer tooling are omitted from the production runtime image;
+- development, optional, and peer tooling are omitted from the production runtime image;
 - the CI runtime-security job fails when a high or critical advisory affects a package physically installed in the production runtime tree;
-- lockfile-only advisories for omitted development/peer tooling do not cause a false production failure;
+- lockfile-only advisories for omitted development/peer/optional tooling do not cause a false production failure;
 - vulnerable transitive `multer` versions are overridden to `2.3.0` until upstream dependency constraints no longer require the override;
 - a production Docker image build is a CI gate.
 
