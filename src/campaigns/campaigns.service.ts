@@ -40,13 +40,17 @@ export class CampaignsService {
   ) {}
 
   async create(tenantId: string, dto: CreateCampaignDto) {
-    const audience = this.normalizeAudience(dto.audience);
+    const personalizationEnabled = dto.personalizationEnabled === true;
+    const audience = {
+      ...this.normalizeAudience(dto.audience),
+      ...(personalizationEnabled ? { personalizationEnabled: true } : {}),
+    };
     const name = dto.name.trim();
     if (!name) {
       throw new BadRequestException("Campaign name must contain non-whitespace characters");
     }
 
-    if (dto.components) {
+    if (personalizationEnabled && dto.components) {
       this.assertComponentsValid(dto.components);
     }
 
