@@ -5,8 +5,11 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from "@nestjs/common";
-import { MetaTemplateClient } from "../meta/meta-template.client.js";
+import type { AuditRequestContext } from "../audit/audit.types.js";
+import { auditLogData, mutationActor } from "../audit/audit-write.util.js";
+import type { ApiPrincipal } from "../auth/auth.types.js";
 import { Prisma } from "../generated/prisma/client.js";
+import { MetaTemplateClient } from "../meta/meta-template.client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { ListTemplatesQueryDto } from "./dto/list-templates-query.dto.js";
 import { SyncTemplatesDto } from "./dto/sync-templates.dto.js";
@@ -27,7 +30,13 @@ export class TemplatesService {
     private readonly metaTemplates: MetaTemplateClient,
   ) {}
 
-  async sync(tenantId: string, dto: SyncTemplatesDto) {
+  async sync(
+    tenantOrPrincipal: string | ApiPrincipal,
+    dto: SyncTemplatesDto,
+    auditContext?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(tenantOrPrincipal);
+    const tenantId = actor.tenantId;
     const remote = await this.metaTemplates.listTemplates(tenantId, dto.senderId);
     const providerTemplateIds = remote.templates.map((template) => template.id);
 
@@ -81,7 +90,7 @@ export class TemplatesService {
         });
       }
 
-      return transaction.messageTemplate.updateMany({
+      const deleted = await transaction.messageTemplate.updateMany({
         where: {
           tenantId,
           wabaId: remote.wabaId,
@@ -95,6 +104,29 @@ export class TemplatesService {
           lastSyncedAt: syncedAt,
         },
       });
+
+      const audit = auditLogData(
+        actor,
+        auditContext,
+        "template_catalog.synced",
+        "WhatsAppBusinessAccount",
+        remote.wabaId,
+        {
+          synced: remote.templates.length,
+          markedDeleted: deleted.count,
+          statusCounts: this.valueCounts(
+            remote.templates.map((template) => template.status.toUpperCase()),
+          ),
+          categoryCounts: this.valueCounts(
+            remote.templates.map((template) => template.category?.toUpperCase() ?? "UNSPECIFIED"),
+          ),
+        },
+      );
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+
+      return deleted;
     });
 
     return {
@@ -240,6 +272,14 @@ export class TemplatesService {
       throw new UnprocessableEntityException("Template message payload requires a non-empty language");
     }
     return { name: value.name.trim(), language: value.language.trim() };
+  }
+
+  private valueCounts(values: string[]): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const value of values) {
+      counts[value] = (counts[value] ?? 0) + 1;
+    }
+    return counts;
   }
 
   private toJson(value: unknown): Prisma.InputJsonValue {
