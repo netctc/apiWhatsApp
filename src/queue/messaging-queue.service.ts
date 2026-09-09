@@ -52,12 +52,10 @@ export class MessagingQueueService implements OnModuleDestroy {
   }
 
   async consumeOutboundMessages(handler: OutboundHandler, onExhausted: ExhaustedHandler): Promise<void> {
-    await Promise.all([
-      ...TRAFFIC_CLASSES.map((trafficClass) =>
-        this.startTrafficConsumer(trafficClass, handler, onExhausted),
-      ),
-      this.startLegacyConsumer(handler, onExhausted),
-    ]);
+    for (const trafficClass of TRAFFIC_CLASSES) {
+      await this.startTrafficConsumer(trafficClass, handler, onExhausted);
+    }
+    await this.startLegacyConsumer(handler, onExhausted);
 
     this.logger.log(
       `Outbound consumers ready: OTP=${this.prefetchFor(MessageTrafficClass.OTP)}, ` +
