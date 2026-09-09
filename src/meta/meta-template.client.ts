@@ -37,6 +37,7 @@ export class MetaTemplateClient {
 
     const templates: MetaMessageTemplate[] = [];
     let after: string | undefined;
+    let completed = false;
     const seenCursors = new Set<string>();
 
     for (let page = 0; page < 100; page += 1) {
@@ -55,10 +56,17 @@ export class MetaTemplateClient {
 
       const next = this.extractAfterCursor(responseBody);
       if (!next || seenCursors.has(next)) {
+        completed = true;
         break;
       }
       seenCursors.add(next);
       after = next;
+    }
+
+    if (!completed) {
+      throw new MetaApiError("Meta template pagination exceeded the configured 100-page safety limit", {
+        retryable: false,
+      });
     }
 
     return {
