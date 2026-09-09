@@ -127,7 +127,10 @@ export class MetaTemplateClient {
     const result: MetaMessageTemplate[] = [];
     for (const candidate of data) {
       if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-        continue;
+        throw new MetaApiError("Meta template API returned a malformed template entry", {
+          retryable: false,
+          response: candidate,
+        });
       }
       const item = candidate as Record<string, unknown>;
       if (
@@ -136,7 +139,10 @@ export class MetaTemplateClient {
         typeof item.language !== "string" ||
         typeof item.status !== "string"
       ) {
-        continue;
+        throw new MetaApiError("Meta template API returned a template without required identity fields", {
+          retryable: false,
+          response: item,
+        });
       }
 
       result.push({
