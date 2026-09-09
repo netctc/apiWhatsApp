@@ -80,11 +80,11 @@ export class MessagesService {
             aggregateType: "Message",
             aggregateId: message.id,
             eventType: OUTBOUND_REQUESTED_EVENT,
-            payload: {
+            payload: this.toJson({
               messageId: message.id,
               trafficClass,
               ...(trace ? { trace } : {}),
-            },
+            }),
           },
         });
 
