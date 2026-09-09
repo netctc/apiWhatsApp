@@ -267,6 +267,7 @@ model CampaignRecipient {
 
   @@unique([campaignId, contactId])
   @@index([campaignId, status, nextAttemptAt, processingLeaseUntil, createdAt])
+  @@index([status, nextAttemptAt, processingLeaseUntil, createdAt])
   @@index([contactId, createdAt])
 }
 
