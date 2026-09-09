@@ -100,11 +100,16 @@ describe("CampaignsService", () => {
     expect(resolveForTenant).not.toHaveBeenCalled();
   });
 
-  it("normalizes the campaign name and stores the explicit audience definition", async () => {
+  it("normalizes the campaign name and tag segmentation rules", async () => {
     await service.create(TENANT_ID, {
       name: "  September offer  ",
       templateId: TEMPLATE_ID,
-      audience: { allOptedIn: true, language: " en_US " },
+      audience: {
+        allOptedIn: true,
+        language: " en_US ",
+        tagsAny: ["VIP", "renewal:2026", "vip"],
+        tagsAll: ["Marketing"],
+      },
     });
 
     expect(campaignCreate).toHaveBeenCalledWith({
@@ -113,10 +118,34 @@ describe("CampaignsService", () => {
         senderId: SENDER_ID,
         templateId: TEMPLATE_ID,
         name: "September offer",
-        audience: { allOptedIn: true, language: "en_US" },
+        audience: {
+          allOptedIn: true,
+          language: "en_US",
+          tagsAny: ["renewal:2026", "vip"],
+          tagsAll: ["marketing"],
+        },
       }),
       include: expect.any(Object),
     });
+  });
+
+  it("rejects unsupported personalization before resolving the sender", async () => {
+    await expect(
+      service.create(TENANT_ID, {
+        name: "Promo",
+        templateId: TEMPLATE_ID,
+        audience: { allOptedIn: true },
+        components: [
+          {
+            type: "body",
+            parameters: [{ type: "text", text: "Hello {{contact.name}}" }],
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(resolveForTenant).not.toHaveBeenCalled();
+    expect(campaignCreate).not.toHaveBeenCalled();
   });
 
   it("terminalizes pending recipients only when the campaign actually transitions to FAILED", async () => {
