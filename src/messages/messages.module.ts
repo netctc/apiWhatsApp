@@ -10,5 +10,6 @@ import { OutboundPolicyService } from "./outbound-policy.service.js";
   imports: [ContactsModule, PhoneNumbersModule, TemplatesModule],
   controllers: [MessagesController],
   providers: [MessagesService, OutboundPolicyService],
+  exports: [MessagesService],
 })
 export class MessagesModule {}

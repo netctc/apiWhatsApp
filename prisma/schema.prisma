@@ -56,6 +56,25 @@ enum MessageType {
   UNKNOWN
 }
 
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  PROCESSING
+  QUEUED
+  SKIPPED
+  FAILED
+  CANCELLED
+}
+
 model Tenant {
   id           String                @id @default(uuid()) @db.Uuid
   name         String
@@ -69,6 +88,7 @@ model Tenant {
   consents     ContactConsentEvent[]
   phoneNumbers WhatsAppPhoneNumber[]
   templates    MessageTemplate[]
+  campaigns    Campaign[]
   auditLogs    AuditLog[]
 }
 
@@ -110,20 +130,21 @@ model AuditLog {
 }
 
 model WhatsAppPhoneNumber {
-  id                    String    @id @default(uuid()) @db.Uuid
-  tenantId              String    @db.Uuid
-  providerPhoneNumberId String    @unique
+  id                    String     @id @default(uuid()) @db.Uuid
+  tenantId              String     @db.Uuid
+  providerPhoneNumberId String     @unique
   wabaId                 String?
   displayPhoneNumber     String?
   verifiedName           String?
   credentialRef          String
   rateLimitPerSecond     Int?
-  active                 Boolean   @default(true)
-  isDefault              Boolean   @default(false)
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
-  tenant                 Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  active                 Boolean    @default(true)
+  isDefault              Boolean    @default(false)
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+  tenant                 Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   messages               Message[]
+  campaigns              Campaign[]
 
   @@index([tenantId, active, isDefault])
   @@index([tenantId, wabaId, active])
@@ -131,10 +152,10 @@ model WhatsAppPhoneNumber {
 }
 
 model MessageTemplate {
-  id                 String   @id @default(uuid()) @db.Uuid
-  tenantId           String   @db.Uuid
+  id                 String     @id @default(uuid()) @db.Uuid
+  tenantId           String     @db.Uuid
   wabaId              String
-  providerTemplateId String   @unique
+  providerTemplateId String     @unique
   name                String
   language            String
   category            String?
@@ -144,9 +165,10 @@ model MessageTemplate {
   rejectionReason     String?
   providerPayload     Json?
   lastSyncedAt        DateTime?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  tenant              Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaigns           Campaign[]
 
   @@unique([tenantId, wabaId, name, language])
   @@index([tenantId, wabaId, status, name])
@@ -154,23 +176,24 @@ model MessageTemplate {
 }
 
 model Contact {
-  id                     String        @id @default(uuid()) @db.Uuid
-  tenantId               String        @db.Uuid
+  id                     String              @id @default(uuid()) @db.Uuid
+  tenantId               String              @db.Uuid
   phone                  String
   name                   String?
   language               String?
   timezone               String?
-  consentStatus          ConsentStatus @default(UNKNOWN)
+  consentStatus          ConsentStatus       @default(UNKNOWN)
   consentSource          String?
   consentAt              DateTime?
   optedOutAt             DateTime?
   lastInboundAt          DateTime?
   serviceWindowExpiresAt DateTime?
   metadata               Json?
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
-  tenant                 Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   consentEvents          ContactConsentEvent[]
+  campaignRecipients     CampaignRecipient[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, consentStatus, createdAt])
@@ -192,36 +215,94 @@ model ContactConsentEvent {
   @@index([tenantId, contactId, occurredAt])
 }
 
+model Campaign {
+  id                  String              @id @default(uuid()) @db.Uuid
+  tenantId            String              @db.Uuid
+  senderId            String              @db.Uuid
+  templateId          String              @db.Uuid
+  name                String
+  status              CampaignStatus      @default(DRAFT)
+  audience            Json
+  components          Json?
+  scheduledAt         DateTime?
+  snapshotAt          DateTime?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  cancelledAt         DateTime?
+  failureReason       String?
+  totalRecipients     Int                 @default(0)
+  queuedRecipients    Int                 @default(0)
+  skippedRecipients   Int                 @default(0)
+  failedRecipients    Int                 @default(0)
+  cancelledRecipients Int                 @default(0)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  tenant              Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sender              WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  template            MessageTemplate     @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  recipients          CampaignRecipient[]
+
+  @@index([tenantId, status, scheduledAt, createdAt])
+  @@index([status, scheduledAt])
+  @@index([tenantId, createdAt])
+  @@index([senderId, status])
+  @@index([templateId, status])
+}
+
+model CampaignRecipient {
+  id                   String                  @id @default(uuid()) @db.Uuid
+  campaignId           String                  @db.Uuid
+  contactId            String                  @db.Uuid
+  messageId            String?                 @unique @db.Uuid
+  status               CampaignRecipientStatus @default(PENDING)
+  attemptCount         Int                     @default(0)
+  nextAttemptAt        DateTime                @default(now())
+  processingLeaseUntil DateTime?
+  lastError            String?
+  queuedAt             DateTime?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  campaign             Campaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact              Contact                 @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  message              Message?                @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId, status, nextAttemptAt, processingLeaseUntil, createdAt])
+  @@index([status, nextAttemptAt, processingLeaseUntil, createdAt])
+  @@index([contactId, createdAt])
+}
+
 model Message {
-  id                   String               @id @default(uuid()) @db.Uuid
-  tenantId             String?              @db.Uuid
-  senderId             String?              @db.Uuid
+  id                   String                 @id @default(uuid()) @db.Uuid
+  tenantId             String?                @db.Uuid
+  senderId             String?                @db.Uuid
   direction            MessageDirection
-  trafficClass         MessageTrafficClass  @default(TRANSACTIONAL)
+  trafficClass         MessageTrafficClass    @default(TRANSACTIONAL)
   type                 MessageType
-  status               MessageStatus        @default(CREATED)
+  status               MessageStatus          @default(CREATED)
   to                   String?
   from                 String?
-  providerMessageId    String?              @unique
+  providerMessageId    String?                @unique
   providerTimestamp    DateTime?
   idempotencyKey       String?
   payload              Json
   providerResponse     Json?
   errorCode            String?
   errorMessage         String?
-  attemptCount         Int                  @default(0)
+  attemptCount         Int                    @default(0)
   lastAttemptAt        DateTime?
   processingLeaseUntil DateTime?
-  createdAt            DateTime             @default(now())
-  updatedAt            DateTime             @updatedAt
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
   submittedAt          DateTime?
   sentAt               DateTime?
   deliveredAt          DateTime?
   readAt               DateTime?
   failedAt             DateTime?
-  tenant               Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  sender               WhatsAppPhoneNumber? @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  tenant               Tenant?                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  sender               WhatsAppPhoneNumber?   @relation(fields: [senderId], references: [id], onDelete: Restrict)
   statusEvents         MessageStatusEvent[]
+  campaignRecipient    CampaignRecipient?
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, createdAt])

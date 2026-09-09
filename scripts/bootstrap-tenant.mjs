@@ -54,6 +54,8 @@ try {
           "phone_numbers:write",
           "templates:read",
           "templates:write",
+          "campaigns:read",
+          "campaigns:write",
           "api_keys:read",
           "api_keys:write",
           "audit:read",

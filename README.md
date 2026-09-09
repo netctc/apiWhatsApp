@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.6.0
+## Current release: 0.7.0
 
 The platform currently provides:
 
@@ -18,10 +18,12 @@ The platform currently provides:
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues/retries/DLQs and consumer prefetch per traffic class
 - Priority-aware Redis sender capacity reservation with late-window borrowing
+- Marketing campaign drafts, explicit opted-in audience snapshots, scheduling, pause/resume/cancel, and recipient-level results
+- Multi-replica campaign processing with leases, crash recovery, and deterministic recipient idempotency
 - Transactional outbox
 - Inbound message persistence and signed Meta webhooks
 - Delivery status processing (`sent`, `delivered`, `read`, `failed`)
-- Cursor-paginated message, template, and audit APIs
+- Cursor-paginated message, template, campaign, recipient, and audit APIs
 - OpenAPI / Swagger
 - Docker-based local infrastructure
 - Versioned database migrations
@@ -33,6 +35,11 @@ flowchart LR
     Client[CRM / ERP / Application] --> Auth[X-API-Key]
     Auth --> API[REST API]
     API --> DB[(PostgreSQL)]
+    API --> Campaign[Campaign Snapshot]
+    Campaign --> DB
+    DB --> CampaignProcessor[Campaign Processor]
+    CampaignProcessor --> MessageAPI[Shared Message Policy]
+    MessageAPI --> DB
     DB --> Outbox[Transactional Outbox]
     Outbox --> Router[Traffic Router]
     Router --> OTP[(RabbitMQ OTP)]
@@ -51,6 +58,8 @@ flowchart LR
 ```
 
 Outbound HTTP requests never wait for WhatsApp delivery. A message and its outbox intent are committed atomically, then published to the queue selected from the persisted server-derived traffic class.
+
+Campaigns do not bypass the normal message path. Each eligible campaign recipient is converted into a normal idempotent template message through `MessagesService`, so sender ownership, current consent, template approval, outbox durability, MARKETING routing, retries, and sender rate limits remain shared.
 
 ## Requirements
 
@@ -106,6 +115,8 @@ phone_numbers:read
 phone_numbers:write
 templates:read
 templates:write
+campaigns:read
+campaigns:write
 api_keys:read
 api_keys:write
 audit:read
@@ -208,6 +219,78 @@ The total Redis counter deliberately retains the pre-0.6 key format. Old and new
 
 Custom transactional + marketing shares above 90% are rejected in favor of the safe defaults so the reservation phase always keeps OTP headroom.
 
+## Campaign foundation
+
+Campaigns are deliberately restricted to synchronized templates whose current local state is exactly `APPROVED` and whose category is `MARKETING`. The selected sender and template must belong to the same WABA.
+
+Campaign endpoints:
+
+```text
+POST /api/v1/campaigns
+GET  /api/v1/campaigns
+GET  /api/v1/campaigns/{campaignId}
+GET  /api/v1/campaigns/{campaignId}/recipients
+POST /api/v1/campaigns/{campaignId}/launch
+POST /api/v1/campaigns/{campaignId}/pause
+POST /api/v1/campaigns/{campaignId}/resume
+POST /api/v1/campaigns/{campaignId}/cancel
+```
+
+### Create a draft
+
+The audience must be explicit. Omitting audience selection never means “all contacts”. Choose exactly one of `allOptedIn=true` or a non-empty `contactIds` array.
+
+```json
+{
+  "name": "September renewal offer",
+  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d",
+  "templateId": "31ee3b2f-5fbd-44bb-a4aa-b252a3a66c12",
+  "audience": {
+    "allOptedIn": true,
+    "language": "en_US"
+  },
+  "components": [],
+  "scheduledAt": "2026-09-10T09:00:00Z"
+}
+```
+
+`scheduledAt` does not launch the campaign by itself. Call `/launch` after reviewing the draft; launch creates the durable recipient snapshot and either starts immediately or moves the campaign to `SCHEDULED`.
+
+### Audience snapshot and consent
+
+Launch runs under a row lock and repeatable-read transaction. It snapshots only tenant contacts that are `OPTED_IN` at that moment, applies the optional language filter, and stores one immutable `CampaignRecipient` row per selected contact. The foundation release enforces `CAMPAIGN_MAX_RECIPIENTS` with an absolute safety cap of 50,000 recipients per campaign.
+
+Consent is checked **again** just before message creation. A contact that opted out after the launch snapshot is marked `SKIPPED` and receives no new campaign message.
+
+### Multi-replica processing and crash recovery
+
+Campaign recipients use database leases and `FOR UPDATE SKIP LOCKED`, so multiple API replicas can process campaigns concurrently without claiming the same recipient. Both due `PENDING` recipients and expired `PROCESSING` leases are claimable; a process crash therefore does not strand a recipient permanently.
+
+Each recipient uses this stable message idempotency key:
+
+```text
+campaign:<campaignId>:contact:<contactId>
+```
+
+If a process creates the message but dies before marking the recipient `QUEUED`, a later lease owner re-enters the normal message API with the same key and receives the existing logical message instead of creating a duplicate.
+
+Campaign/template configuration is revalidated during processing. If the sender becomes invalid or the template stops being approved/marketing, the campaign transitions to `FAILED` and unprocessed pending recipients are terminalized as failed. If `pause` or `cancel` wins a concurrent state race, processor updates cannot overwrite that newer state.
+
+### Lifecycle semantics
+
+```text
+DRAFT -> RUNNING -> COMPLETED
+  |        |  \
+  |        |   -> PAUSED -> RUNNING
+  |        -> FAILED
+  -> SCHEDULED -> RUNNING
+  \----------------------> CANCELLED
+```
+
+`COMPLETED` means every snapshotted recipient reached a campaign-orchestration terminal state (`QUEUED`, `SKIPPED`, `FAILED`, or `CANCELLED`). It does **not** mean every WhatsApp delivery is complete. Recipient listings include the linked message and its current message status so delivery can be inspected separately.
+
+`pause` and `cancel` stop new claims. A recipient already past message creation may finish, but deterministic message idempotency prevents duplicate logical sends.
+
 ## Messaging API
 
 Send:
@@ -278,7 +361,9 @@ The durable processor handles inbound messages, outbound delivery receipts, and 
 - Per-message processing leases
 - Per-sender Redis rate limiting
 - Class-specific RabbitMQ consumer channels
-- Legacy queue draining during 0.6 rollout
+- Legacy queue draining during rolling upgrades
+- Campaign recipient leases with expired-claim recovery and deterministic message idempotency
+- Conditional campaign state transitions to avoid pause/cancel/completion races
 - Durable webhook ingestion/retry
 
 ## Production commands
@@ -315,13 +400,19 @@ OUTBOUND_WORKER_PREFETCH_MARKETING
 OUTBOUND_PRIORITY_RESERVATION_WINDOW_MS
 OUTBOUND_TRANSACTIONAL_MAX_SHARE
 OUTBOUND_MARKETING_MAX_SHARE
+CAMPAIGN_MAX_RECIPIENTS
+CAMPAIGN_PROCESSOR_INTERVAL_MS
+CAMPAIGN_PROCESSOR_BATCH_SIZE
+CAMPAIGN_PROCESSOR_LEASE_MS
+CAMPAIGN_RECIPIENT_MAX_ATTEMPTS
 ```
 
 Never commit production credentials or tokens.
 
 ## Next implementation slices
 
-- campaign orchestration and segmentation on top of `MARKETING` traffic
+- campaign segmentation beyond explicit contacts/language and per-recipient template personalization
+- campaign analytics tied to submitted/delivered/read/failed message outcomes
 - audit coverage for additional administrative configuration actions
 - provider-backed secret stores beyond environment references
 - media messages and media storage
