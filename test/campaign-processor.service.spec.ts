@@ -13,6 +13,7 @@ const RECIPIENT_ID = "fb49c090-f6c6-4ef0-831c-64db1034c7c8";
 const CONTACT_ID = "76502a14-7dd9-4bf2-894e-ff7d477f40f0";
 const SENDER_ID = "1b7d45aa-b4df-47d9-b130-8c454faaf74b";
 const TENANT_ID = "123e4567-e89b-42d3-a456-426614174000";
+const MESSAGE_ID = "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1";
 
 function claim() {
   return {
@@ -31,7 +32,11 @@ function claim() {
   };
 }
 
-function loadedRecipient(consentStatus: ConsentStatus, templateStatus = "APPROVED") {
+function loadedRecipient(
+  consentStatus: ConsentStatus,
+  templateStatus = "APPROVED",
+  campaignStatus = CampaignStatus.RUNNING,
+) {
   return {
     ...claim(),
     contact: {
@@ -43,7 +48,7 @@ function loadedRecipient(consentStatus: ConsentStatus, templateStatus = "APPROVE
       id: CAMPAIGN_ID,
       tenantId: TENANT_ID,
       senderId: SENDER_ID,
-      status: CampaignStatus.RUNNING,
+      status: campaignStatus,
       failureReason: null,
       components: [],
       sender: {
@@ -68,6 +73,7 @@ describe("CampaignProcessorService", () => {
   const recipientUpdateMany = jest.fn();
   const campaignFindUnique = jest.fn();
   const campaignUpdateMany = jest.fn();
+  const existingMessageFindFirst = jest.fn();
   const messageCreate = jest.fn();
   const failCampaign = jest.fn();
   const refreshStats = jest.fn();
@@ -83,6 +89,9 @@ describe("CampaignProcessorService", () => {
         findUnique: campaignFindUnique,
         updateMany: campaignUpdateMany,
       },
+      message: {
+        findFirst: existingMessageFindFirst,
+      },
     } as never,
     { create: messageCreate } as never,
     { failCampaign, refreshStats } as never,
@@ -93,11 +102,12 @@ describe("CampaignProcessorService", () => {
     queryRaw.mockResolvedValue([]);
     recipientUpdateMany.mockResolvedValue({ count: 1 });
     campaignUpdateMany.mockResolvedValue({ count: 0 });
+    existingMessageFindFirst.mockResolvedValue(null);
     failCampaign.mockResolvedValue(true);
     refreshStats.mockResolvedValue(undefined);
   });
 
-  it("reclaims expired PROCESSING recipients as well as due PENDING recipients", async () => {
+  it("reclaims expired PROCESSING recipients even after the campaign left RUNNING", async () => {
     const internal = service as unknown as {
       claimRecipients(batchSize: number): Promise<unknown[]>;
     };
@@ -107,12 +117,13 @@ describe("CampaignProcessorService", () => {
     const sql = queryRaw.mock.calls[0]?.[0] as { strings?: readonly string[] };
     const text = sql.strings?.join("") ?? "";
     expect(text).toContain("r.\"status\" = 'PENDING'");
+    expect(text).toContain("c.\"status\" = 'RUNNING'");
     expect(text).toContain("r.\"status\" = 'PROCESSING'");
     expect(text).toContain("r.\"processingLeaseUntil\" <= NOW()");
     expect(text).toContain("FOR UPDATE OF r SKIP LOCKED");
   });
 
-  it("maps a current consent-policy rejection to SKIPPED", async () => {
+  it("maps a current consent-policy rejection to SKIPPED when no message exists", async () => {
     recipientFindUnique.mockResolvedValue(loadedRecipient(ConsentStatus.OPTED_OUT));
     messageCreate.mockRejectedValue(
       new ForbiddenException("Template messages require explicit contact opt-in"),
@@ -123,6 +134,13 @@ describe("CampaignProcessorService", () => {
 
     await internal.processRecipient(claim());
 
+    expect(existingMessageFindFirst).toHaveBeenCalledWith({
+      where: {
+        tenantId: TENANT_ID,
+        idempotencyKey: `campaign:${CAMPAIGN_ID}:contact:${CONTACT_ID}`,
+      },
+      select: { id: true },
+    });
     expect(messageCreate).toHaveBeenCalledTimes(1);
     expect(recipientUpdateMany).toHaveBeenCalledWith({
       where: {
@@ -138,21 +156,24 @@ describe("CampaignProcessorService", () => {
     });
   });
 
-  it("links an already-created idempotent message even if consent changed after the crash", async () => {
-    recipientFindUnique.mockResolvedValue(loadedRecipient(ConsentStatus.OPTED_OUT));
-    messageCreate.mockResolvedValue({ id: "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1" });
+  it("links an already-created message before checking terminal campaign state or current consent", async () => {
+    recipientFindUnique.mockResolvedValue(
+      loadedRecipient(ConsentStatus.OPTED_OUT, "REJECTED", CampaignStatus.CANCELLED),
+    );
+    existingMessageFindFirst.mockResolvedValue({ id: MESSAGE_ID });
     const internal = service as unknown as {
       processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
     };
 
     await internal.processRecipient(claim());
 
-    expect(messageCreate).toHaveBeenCalledTimes(1);
+    expect(messageCreate).not.toHaveBeenCalled();
+    expect(failCampaign).not.toHaveBeenCalled();
     expect(recipientUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: CampaignRecipientStatus.QUEUED,
-          messageId: "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1",
+          messageId: MESSAGE_ID,
         }),
       }),
     );
@@ -182,7 +203,7 @@ describe("CampaignProcessorService", () => {
 
   it("uses one deterministic message idempotency key per campaign contact", async () => {
     recipientFindUnique.mockResolvedValue(loadedRecipient(ConsentStatus.OPTED_IN));
-    messageCreate.mockResolvedValue({ id: "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1" });
+    messageCreate.mockResolvedValue({ id: MESSAGE_ID });
     const internal = service as unknown as {
       processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
     };
@@ -207,7 +228,7 @@ describe("CampaignProcessorService", () => {
         }),
         data: expect.objectContaining({
           status: CampaignRecipientStatus.QUEUED,
-          messageId: "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1",
+          messageId: MESSAGE_ID,
         }),
       }),
     );
