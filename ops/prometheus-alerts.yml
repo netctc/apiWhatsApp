@@ -1,0 +1,42 @@
+groups:
+  - name: api-whatsapp
+    rules:
+      - alert: ApiWhatsAppTargetDown
+        expr: up{job="api-whatsapp"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: apiWhatsApp metrics target is unavailable
+          description: Prometheus has been unable to scrape the apiWhatsApp target for at least two minutes.
+
+      - alert: ApiWhatsAppOutboxStalled
+        expr: api_whatsapp_outbox_pending > 0 and api_whatsapp_outbox_oldest_pending_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: apiWhatsApp transactional outbox is stalled
+          description: The oldest unpublished outbox record has been pending for more than five minutes.
+
+      - alert: ApiWhatsAppWebhookProcessorStalled
+        expr: api_whatsapp_webhook_pending > 0 and api_whatsapp_webhook_oldest_pending_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: apiWhatsApp webhook processor is stalled
+          description: The oldest unprocessed durable webhook has been pending for more than five minutes.
+
+      - alert: ApiWhatsAppHighHttp5xxRate
+        expr: |
+          sum(rate(api_whatsapp_http_requests_total{status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(api_whatsapp_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: apiWhatsApp has an elevated HTTP 5xx rate
+          description: More than five percent of observed HTTP requests have returned 5xx responses for ten minutes.
