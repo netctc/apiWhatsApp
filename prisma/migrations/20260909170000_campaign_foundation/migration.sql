@@ -71,6 +71,9 @@ CREATE UNIQUE INDEX "CampaignRecipient_campaignId_contactId_key" ON "CampaignRec
 CREATE INDEX "CampaignRecipient_campaignId_status_nextAttemptAt_processingLeaseUntil_createdAt_idx" ON "CampaignRecipient"("campaignId", "status", "nextAttemptAt", "processingLeaseUntil", "createdAt");
 
 -- CreateIndex
+CREATE INDEX "CampaignRecipient_status_nextAttemptAt_processingLeaseUntil_createdAt_idx" ON "CampaignRecipient"("status", "nextAttemptAt", "processingLeaseUntil", "createdAt");
+
+-- CreateIndex
 CREATE INDEX "CampaignRecipient_contactId_createdAt_idx" ON "CampaignRecipient"("contactId", "createdAt");
 
 -- AddForeignKey
