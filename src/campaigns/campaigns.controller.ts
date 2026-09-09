@@ -14,6 +14,7 @@ import { ApiScope } from "../auth/auth.constants.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
 import { RequireScopes } from "../auth/require-scopes.decorator.js";
+import { CampaignAnalyticsService } from "./campaign-analytics.service.js";
 import { CampaignsService } from "./campaigns.service.js";
 import { CreateCampaignDto } from "./dto/create-campaign.dto.js";
 import { ListCampaignRecipientsQueryDto } from "./dto/list-campaign-recipients-query.dto.js";
@@ -25,7 +26,10 @@ const campaignIdPipe = new ParseUUIDPipe({ version: "4" });
 @ApiSecurity("apiKey")
 @Controller("v1/campaigns")
 export class CampaignsController {
-  constructor(private readonly campaigns: CampaignsService) {}
+  constructor(
+    private readonly campaigns: CampaignsService,
+    private readonly analytics: CampaignAnalyticsService,
+  ) {}
 
   @Post()
   @RequireScopes(ApiScope.CAMPAIGNS_WRITE)
@@ -50,6 +54,16 @@ export class CampaignsController {
     @Query() query: ListCampaignRecipientsQueryDto,
   ) {
     return this.campaigns.listRecipients(principal.tenantId, id, query);
+  }
+
+  @Get(":id/analytics")
+  @RequireScopes(ApiScope.CAMPAIGNS_READ)
+  @ApiOperation({ summary: "Get live campaign orchestration and WhatsApp delivery analytics" })
+  analyticsForCampaign(
+    @CurrentPrincipal() principal: ApiPrincipal,
+    @Param("id", campaignIdPipe) id: string,
+  ) {
+    return this.analytics.get(principal.tenantId, id);
   }
 
   @Get(":id")
