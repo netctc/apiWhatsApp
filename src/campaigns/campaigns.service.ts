@@ -422,7 +422,7 @@ export class CampaignsService {
     });
   }
 
-  private normalizeAudience(audience: CampaignAudienceDto): NormalizedCampaignAudience {
+  private normalizeAudience(audience?: CampaignAudienceDto): NormalizedCampaignAudience {
     const allOptedIn = audience?.allOptedIn === true;
     const contactIds = audience?.contactIds?.filter(Boolean) ?? [];
     const hasExplicitContacts = contactIds.length > 0;
@@ -433,7 +433,7 @@ export class CampaignsService {
       );
     }
 
-    const language = audience.language?.trim();
+    const language = audience?.language?.trim();
     return {
       allOptedIn,
       ...(hasExplicitContacts ? { contactIds } : {}),
