@@ -107,9 +107,17 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
         SELECT r."id"
         FROM "CampaignRecipient" AS r
         INNER JOIN "Campaign" AS c ON c."id" = r."campaignId"
-        WHERE r."status" = 'PENDING'
-          AND r."nextAttemptAt" <= NOW()
-          AND (r."processingLeaseUntil" IS NULL OR r."processingLeaseUntil" <= NOW())
+        WHERE (
+            (
+              r."status" = 'PENDING'
+              AND r."nextAttemptAt" <= NOW()
+              AND (r."processingLeaseUntil" IS NULL OR r."processingLeaseUntil" <= NOW())
+            )
+            OR (
+              r."status" = 'PROCESSING'
+              AND r."processingLeaseUntil" <= NOW()
+            )
+          )
           AND c."status" = 'RUNNING'
         ORDER BY r."createdAt" ASC
         LIMIT ${batchSize}
@@ -145,33 +153,21 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
 
     const campaign = recipient.campaign;
     if (campaign.status !== CampaignStatus.RUNNING) {
-      if (campaign.status === CampaignStatus.CANCELLED) {
-        await this.completeClaim(claim, {
-          status: CampaignRecipientStatus.CANCELLED,
-          lastError: "Campaign cancelled while recipient was in flight",
-        });
-      } else if (campaign.status === CampaignStatus.FAILED) {
-        await this.completeClaim(claim, {
-          status: CampaignRecipientStatus.FAILED,
-          lastError: campaign.failureReason ?? "Campaign failed while recipient was in flight",
-        });
-      } else {
-        await this.completeClaim(claim, {
-          status: CampaignRecipientStatus.PENDING,
-          nextAttemptAt: new Date(),
-          lastError: null,
-        });
-      }
+      await this.completeForCampaignState(claim, campaign.status, campaign.failureReason);
       return;
     }
 
     const configurationError = this.configurationError(campaign);
     if (configurationError) {
-      await this.campaigns.failCampaign(campaign.id, configurationError);
-      await this.completeClaim(claim, {
-        status: CampaignRecipientStatus.FAILED,
-        lastError: configurationError,
-      });
+      const transitioned = await this.campaigns.failCampaign(campaign.id, configurationError);
+      if (transitioned) {
+        await this.completeClaim(claim, {
+          status: CampaignRecipientStatus.FAILED,
+          lastError: configurationError,
+        });
+      } else {
+        await this.completeForCurrentCampaignState(claim, campaign.id, configurationError);
+      }
       return;
     }
 
@@ -214,11 +210,15 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
 
       if (error instanceof UnprocessableEntityException) {
         const reason = error.message.slice(0, 2000);
-        await this.campaigns.failCampaign(campaign.id, reason);
-        await this.completeClaim(claim, {
-          status: CampaignRecipientStatus.FAILED,
-          lastError: reason,
-        });
+        const transitioned = await this.campaigns.failCampaign(campaign.id, reason);
+        if (transitioned) {
+          await this.completeClaim(claim, {
+            status: CampaignRecipientStatus.FAILED,
+            lastError: reason,
+          });
+        } else {
+          await this.completeForCurrentCampaignState(claim, campaign.id, reason);
+        }
         return;
       }
 
@@ -243,6 +243,72 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
       return "Campaign template is no longer categorized as MARKETING";
     }
     return undefined;
+  }
+
+  private async completeForCurrentCampaignState(
+    claim: CampaignRecipient,
+    campaignId: string,
+    fallbackReason: string,
+  ): Promise<void> {
+    const current = await this.prisma.campaign.findUnique({
+      where: { id: campaignId },
+      select: { status: true, failureReason: true },
+    });
+
+    if (!current) {
+      return;
+    }
+
+    await this.completeForCampaignState(
+      claim,
+      current.status,
+      current.failureReason ?? fallbackReason,
+    );
+  }
+
+  private async completeForCampaignState(
+    claim: CampaignRecipient,
+    status: CampaignStatus,
+    failureReason?: string | null,
+  ): Promise<void> {
+    if (status === CampaignStatus.CANCELLED) {
+      await this.completeClaim(claim, {
+        status: CampaignRecipientStatus.CANCELLED,
+        lastError: "Campaign cancelled while recipient was in flight",
+      });
+      return;
+    }
+
+    if (status === CampaignStatus.FAILED) {
+      await this.completeClaim(claim, {
+        status: CampaignRecipientStatus.FAILED,
+        lastError: failureReason ?? "Campaign failed while recipient was in flight",
+      });
+      return;
+    }
+
+    if (status === CampaignStatus.PAUSED || status === CampaignStatus.SCHEDULED) {
+      await this.completeClaim(claim, {
+        status: CampaignRecipientStatus.PENDING,
+        nextAttemptAt: new Date(),
+        lastError: null,
+      });
+      return;
+    }
+
+    if (status === CampaignStatus.COMPLETED) {
+      await this.completeClaim(claim, {
+        status: CampaignRecipientStatus.CANCELLED,
+        lastError: "Campaign completed before this recipient claim could finish",
+      });
+      return;
+    }
+
+    await this.completeClaim(claim, {
+      status: CampaignRecipientStatus.PENDING,
+      nextAttemptAt: new Date(),
+      lastError: null,
+    });
   }
 
   private async retryOrFail(claim: CampaignRecipient, error: unknown): Promise<void> {
