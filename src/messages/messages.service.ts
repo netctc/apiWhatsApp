@@ -1,6 +1,13 @@
-import { BadRequestException, ConflictException, Injectable, UnprocessableEntityException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Optional,
+  UnprocessableEntityException,
+} from "@nestjs/common";
 import { normalizePhoneNumber } from "../contacts/phone.util.js";
 import { MessageDirection, MessageStatus, MessageType, Prisma } from "../generated/prisma/client.js";
+import { TraceContextService } from "../observability/trace-context.service.js";
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { TemplatesService } from "../templates/templates.service.js";
@@ -18,6 +25,7 @@ export class MessagesService {
     private readonly outboundPolicy: OutboundPolicyService,
     private readonly phoneNumbers: PhoneNumbersService,
     private readonly templates: TemplatesService,
+    @Optional() private readonly trace?: TraceContextService,
   ) {}
 
   async create(tenantId: string, dto: CreateMessageDto) {
@@ -46,6 +54,7 @@ export class MessagesService {
     }
 
     const trafficClass = deriveTrafficClass(messageType, templateCategory);
+    const trace = this.trace?.carrier();
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
@@ -71,7 +80,11 @@ export class MessagesService {
             aggregateType: "Message",
             aggregateId: message.id,
             eventType: OUTBOUND_REQUESTED_EVENT,
-            payload: { messageId: message.id, trafficClass },
+            payload: this.toJson({
+              messageId: message.id,
+              trafficClass,
+              ...(trace ? { trace } : {}),
+            }),
           },
         });
 
