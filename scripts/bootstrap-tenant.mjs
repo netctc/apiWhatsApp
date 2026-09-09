@@ -58,6 +58,7 @@ try {
           "campaigns:write",
           "segments:read",
           "segments:write",
+          "operations:read",
           "api_keys:read",
           "api_keys:write",
           "audit:read",
