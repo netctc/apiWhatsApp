@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import { ForbiddenException } from "@nestjs/common";
 import {
   CampaignRecipientStatus,
   CampaignStatus,
@@ -111,15 +112,18 @@ describe("CampaignProcessorService", () => {
     expect(text).toContain("FOR UPDATE OF r SKIP LOCKED");
   });
 
-  it("skips a recipient that opted out after the launch snapshot", async () => {
+  it("maps a current consent-policy rejection to SKIPPED", async () => {
     recipientFindUnique.mockResolvedValue(loadedRecipient(ConsentStatus.OPTED_OUT));
+    messageCreate.mockRejectedValue(
+      new ForbiddenException("Template messages require explicit contact opt-in"),
+    );
     const internal = service as unknown as {
       processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
     };
 
     await internal.processRecipient(claim());
 
-    expect(messageCreate).not.toHaveBeenCalled();
+    expect(messageCreate).toHaveBeenCalledTimes(1);
     expect(recipientUpdateMany).toHaveBeenCalledWith({
       where: {
         id: RECIPIENT_ID,
@@ -128,10 +132,30 @@ describe("CampaignProcessorService", () => {
       },
       data: {
         status: CampaignRecipientStatus.SKIPPED,
-        lastError: "Contact is no longer opted in at campaign processing time",
+        lastError: "Template messages require explicit contact opt-in",
         processingLeaseUntil: null,
       },
     });
+  });
+
+  it("links an already-created idempotent message even if consent changed after the crash", async () => {
+    recipientFindUnique.mockResolvedValue(loadedRecipient(ConsentStatus.OPTED_OUT));
+    messageCreate.mockResolvedValue({ id: "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1" });
+    const internal = service as unknown as {
+      processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
+    };
+
+    await internal.processRecipient(claim());
+
+    expect(messageCreate).toHaveBeenCalledTimes(1);
+    expect(recipientUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: CampaignRecipientStatus.QUEUED,
+          messageId: "57a83b6d-62c7-4674-a99c-bbc65a4cb9c1",
+        }),
+      }),
+    );
   });
 
   it("fails the campaign when the synchronized marketing template is no longer approved", async () => {
