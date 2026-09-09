@@ -89,6 +89,7 @@ model Tenant {
   phoneNumbers WhatsAppPhoneNumber[]
   templates    MessageTemplate[]
   campaigns    Campaign[]
+  segments     ContactSegment[]
   auditLogs    AuditLog[]
 }
 
@@ -215,6 +216,21 @@ model ContactConsentEvent {
   contact    Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, contactId, occurredAt])
+}
+
+model ContactSegment {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  name        String
+  description String?
+  definition  Json
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId, active, updatedAt])
 }
 
 model Campaign {
