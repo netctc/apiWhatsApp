@@ -57,6 +57,7 @@ function loadedRecipient(
       failureReason: null,
       audience: { allOptedIn: true },
       components: [],
+      personalizationEnabled: false,
       sender: {
         id: SENDER_ID,
         active: true,
@@ -187,7 +188,7 @@ describe("CampaignProcessorService", () => {
 
   it("renders contact and metadata tokens before creating the message when explicitly enabled", async () => {
     const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
-    recipient.campaign.audience = { allOptedIn: true, personalizationEnabled: true };
+    recipient.campaign.personalizationEnabled = true;
     recipient.campaign.components = [
       {
         type: "body",
@@ -260,7 +261,7 @@ describe("CampaignProcessorService", () => {
 
   it("skips only the recipient when an enabled personalization value is missing", async () => {
     const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
-    recipient.campaign.audience = { allOptedIn: true, personalizationEnabled: true };
+    recipient.campaign.personalizationEnabled = true;
     recipient.contact.metadata = {};
     recipient.campaign.components = [
       {
