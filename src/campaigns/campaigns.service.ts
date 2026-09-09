@@ -35,6 +35,11 @@ export class CampaignsService {
 
   async create(tenantId: string, dto: CreateCampaignDto) {
     const audience = this.normalizeAudience(dto.audience);
+    const name = dto.name.trim();
+    if (!name) {
+      throw new BadRequestException("Campaign name must contain non-whitespace characters");
+    }
+
     const sender = await this.phoneNumbers.resolveForTenant(tenantId, dto.senderId);
     if (!sender.wabaId) {
       throw new UnprocessableEntityException("The selected WhatsApp sender is missing its WABA ID");
@@ -53,7 +58,7 @@ export class CampaignsService {
         tenantId,
         senderId: sender.id,
         templateId: template.id,
-        name: dto.name.trim(),
+        name,
         audience: this.toJson(audience),
         components: dto.components ? this.toJson(dto.components) : undefined,
         scheduledAt,
@@ -181,7 +186,12 @@ export class CampaignsService {
           throw new NotFoundException("Campaign not found");
         }
 
-        if (campaign.status === CampaignStatus.SCHEDULED || campaign.status === CampaignStatus.RUNNING) {
+        if (
+          campaign.snapshotAt &&
+          (campaign.status === CampaignStatus.SCHEDULED ||
+            campaign.status === CampaignStatus.RUNNING ||
+            campaign.status === CampaignStatus.COMPLETED)
+        ) {
           return campaign;
         }
         if (campaign.status !== CampaignStatus.DRAFT) {
@@ -246,15 +256,24 @@ export class CampaignsService {
   }
 
   async pause(tenantId: string, id: string) {
-    const campaign = await this.findById(tenantId, id);
-    if (campaign.status !== CampaignStatus.RUNNING && campaign.status !== CampaignStatus.SCHEDULED) {
+    const result = await this.prisma.campaign.updateMany({
+      where: {
+        id,
+        tenantId,
+        status: { in: [CampaignStatus.RUNNING, CampaignStatus.SCHEDULED] },
+      },
+      data: { status: CampaignStatus.PAUSED },
+    });
+
+    if (result.count === 0) {
+      const campaign = await this.findById(tenantId, id);
+      if (campaign.status === CampaignStatus.PAUSED) {
+        return campaign;
+      }
       throw new ConflictException(`Campaign in ${campaign.status} state cannot be paused`);
     }
-    return this.prisma.campaign.update({
-      where: { id },
-      data: { status: CampaignStatus.PAUSED },
-      include: this.campaignInclude(),
-    });
+
+    return this.findById(tenantId, id);
   }
 
   async resume(tenantId: string, id: string) {
@@ -269,37 +288,56 @@ export class CampaignsService {
         ? CampaignStatus.SCHEDULED
         : CampaignStatus.RUNNING;
 
-    return this.prisma.campaign.update({
-      where: { id },
+    const result = await this.prisma.campaign.updateMany({
+      where: { id, tenantId, status: CampaignStatus.PAUSED },
       data: {
         status,
         ...(status === CampaignStatus.RUNNING && !campaign.startedAt ? { startedAt: now } : {}),
       },
-      include: this.campaignInclude(),
     });
+
+    if (result.count === 0) {
+      const current = await this.findById(tenantId, id);
+      throw new ConflictException(`Campaign in ${current.status} state cannot be resumed`);
+    }
+
+    return this.findById(tenantId, id);
   }
 
   async cancel(tenantId: string, id: string) {
-    const campaign = await this.findById(tenantId, id);
-    if (
-      campaign.status === CampaignStatus.COMPLETED ||
-      campaign.status === CampaignStatus.CANCELLED ||
-      campaign.status === CampaignStatus.FAILED
-    ) {
-      if (campaign.status === CampaignStatus.CANCELLED) {
-        return campaign;
-      }
-      throw new ConflictException(`Campaign in ${campaign.status} state cannot be cancelled`);
+    const existing = await this.findById(tenantId, id);
+    if (existing.status === CampaignStatus.CANCELLED) {
+      return existing;
+    }
+    if (existing.status === CampaignStatus.COMPLETED || existing.status === CampaignStatus.FAILED) {
+      throw new ConflictException(`Campaign in ${existing.status} state cannot be cancelled`);
     }
 
-    await this.prisma.$transaction(async (transaction) => {
-      await transaction.campaign.update({
-        where: { id },
+    const cancelledAt = new Date();
+    const transitioned = await this.prisma.$transaction(async (transaction) => {
+      const result = await transaction.campaign.updateMany({
+        where: {
+          id,
+          tenantId,
+          status: {
+            in: [
+              CampaignStatus.DRAFT,
+              CampaignStatus.SCHEDULED,
+              CampaignStatus.RUNNING,
+              CampaignStatus.PAUSED,
+            ],
+          },
+        },
         data: {
           status: CampaignStatus.CANCELLED,
-          cancelledAt: new Date(),
+          cancelledAt,
         },
       });
+
+      if (result.count === 0) {
+        return false;
+      }
+
       await transaction.campaignRecipient.updateMany({
         where: { campaignId: id, status: CampaignRecipientStatus.PENDING },
         data: {
@@ -308,7 +346,16 @@ export class CampaignsService {
           lastError: "Campaign cancelled before recipient processing",
         },
       });
+      return true;
     });
+
+    if (!transitioned) {
+      const current = await this.findById(tenantId, id);
+      if (current.status === CampaignStatus.CANCELLED) {
+        return current;
+      }
+      throw new ConflictException(`Campaign in ${current.status} state cannot be cancelled`);
+    }
 
     await this.refreshStats(id);
     return this.findById(tenantId, id);
@@ -324,39 +371,54 @@ export class CampaignsService {
     const pending = counts.get(CampaignRecipientStatus.PENDING) ?? 0;
     const processing = counts.get(CampaignRecipientStatus.PROCESSING) ?? 0;
 
-    const campaign = await this.prisma.campaign.findUnique({
-      where: { id: campaignId },
-      select: { status: true },
-    });
-    if (!campaign) {
-      return;
-    }
-
-    const shouldComplete =
-      campaign.status === CampaignStatus.RUNNING && pending === 0 && processing === 0;
-
-    await this.prisma.campaign.update({
+    const updated = await this.prisma.campaign.updateMany({
       where: { id: campaignId },
       data: {
         queuedRecipients: counts.get(CampaignRecipientStatus.QUEUED) ?? 0,
         skippedRecipients: counts.get(CampaignRecipientStatus.SKIPPED) ?? 0,
         failedRecipients: counts.get(CampaignRecipientStatus.FAILED) ?? 0,
         cancelledRecipients: counts.get(CampaignRecipientStatus.CANCELLED) ?? 0,
-        ...(shouldComplete ? { status: CampaignStatus.COMPLETED, completedAt: new Date() } : {}),
       },
     });
+    if (updated.count === 0) {
+      return;
+    }
+
+    if (pending === 0 && processing === 0) {
+      await this.prisma.campaign.updateMany({
+        where: { id: campaignId, status: CampaignStatus.RUNNING },
+        data: { status: CampaignStatus.COMPLETED, completedAt: new Date() },
+      });
+    }
   }
 
-  async failCampaign(campaignId: string, reason: string): Promise<void> {
-    await this.prisma.campaign.updateMany({
-      where: {
-        id: campaignId,
-        status: { in: [CampaignStatus.RUNNING, CampaignStatus.SCHEDULED] },
-      },
-      data: {
-        status: CampaignStatus.FAILED,
-        failureReason: reason.slice(0, 2000),
-      },
+  async failCampaign(campaignId: string, reason: string): Promise<boolean> {
+    const failureReason = reason.slice(0, 2000);
+    return this.prisma.$transaction(async (transaction) => {
+      const result = await transaction.campaign.updateMany({
+        where: {
+          id: campaignId,
+          status: { in: [CampaignStatus.RUNNING, CampaignStatus.SCHEDULED] },
+        },
+        data: {
+          status: CampaignStatus.FAILED,
+          failureReason,
+        },
+      });
+
+      if (result.count === 0) {
+        return false;
+      }
+
+      await transaction.campaignRecipient.updateMany({
+        where: { campaignId, status: CampaignRecipientStatus.PENDING },
+        data: {
+          status: CampaignRecipientStatus.FAILED,
+          processingLeaseUntil: null,
+          lastError: failureReason,
+        },
+      });
+      return true;
     });
   }
 
