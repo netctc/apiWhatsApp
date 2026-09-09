@@ -295,7 +295,7 @@ Safety rules:
 - a corrupt stored personalization template fails the campaign;
 - when `personalizationEnabled` is omitted or false, `components` are passed through unchanged, including token-like strings.
 
-The opt-in is stored inside the existing campaign configuration JSON only when true. Older campaigns therefore remain byte-for-byte compatible at the schema level and retain static component semantics.
+`Campaign.personalizationEnabled` is a dedicated boolean column with database default `false`. Existing campaigns therefore retain static component semantics after migration, and campaign API responses expose the mode directly instead of mixing it into audience configuration.
 
 ### Processing and crash recovery
 
