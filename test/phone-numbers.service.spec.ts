@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import { UnprocessableEntityException } from "@nestjs/common";
 import { PhoneNumbersService } from "../src/phone-numbers/phone-numbers.service.js";
 
 const TENANT_ID = "123e4567-e89b-12d3-a456-426614174000";
@@ -7,6 +8,7 @@ const FALLBACK_ID = "7db64b92-0761-4bc8-a7ca-3f24cf6ca55a";
 
 describe("PhoneNumbersService", () => {
   const providerFindUnique = jest.fn();
+  const rootFindMany = jest.fn();
   const transactionFindFirst = jest.fn();
   const transactionUpdateMany = jest.fn();
   const transactionCreate = jest.fn();
@@ -28,7 +30,10 @@ describe("PhoneNumbersService", () => {
   );
 
   const service = new PhoneNumbersService({
-    whatsAppPhoneNumber: { findUnique: providerFindUnique },
+    whatsAppPhoneNumber: {
+      findUnique: providerFindUnique,
+      findMany: rootFindMany,
+    },
     $transaction: runTransaction,
   } as never);
 
@@ -94,5 +99,17 @@ describe("PhoneNumbersService", () => {
       where: { id: FALLBACK_ID },
       data: { isDefault: true },
     });
+  });
+
+  it("fails closed when one WABA is associated with more than one tenant", async () => {
+    rootFindMany.mockResolvedValue([
+      { tenantId: "tenant-a" },
+      { tenantId: "tenant-a" },
+      { tenantId: "tenant-b" },
+    ]);
+
+    await expect(service.findTenantIdByWabaId("waba-shared")).rejects.toBeInstanceOf(
+      UnprocessableEntityException,
+    );
   });
 });
