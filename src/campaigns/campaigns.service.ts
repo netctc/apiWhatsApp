@@ -13,6 +13,7 @@ import {
 } from "../generated/prisma/client.js";
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { SegmentsService } from "../segments/segments.service.js";
 import { TemplatesService } from "../templates/templates.service.js";
 import {
   CampaignPersonalizationTemplateError,
@@ -26,6 +27,9 @@ import { ListCampaignsQueryDto } from "./dto/list-campaigns-query.dto.js";
 interface NormalizedCampaignAudience {
   allOptedIn: boolean;
   contactIds?: string[];
+  segmentId?: string;
+  segmentName?: string;
+  segmentUpdatedAt?: string;
   language?: string;
   tagsAny?: string[];
   tagsAll?: string[];
@@ -37,11 +41,12 @@ export class CampaignsService {
     private readonly prisma: PrismaService,
     private readonly phoneNumbers: PhoneNumbersService,
     private readonly templates: TemplatesService,
+    private readonly segments: SegmentsService,
   ) {}
 
   async create(tenantId: string, dto: CreateCampaignDto) {
     const personalizationEnabled = dto.personalizationEnabled === true;
-    const audience = this.normalizeAudience(dto.audience);
+    const audience = await this.normalizeAudience(tenantId, dto.audience);
     const name = dto.name.trim();
     if (!name) {
       throw new BadRequestException("Campaign name must contain non-whitespace characters");
@@ -438,20 +443,43 @@ export class CampaignsService {
     });
   }
 
-  private normalizeAudience(audience?: CampaignAudienceDto): NormalizedCampaignAudience {
+  private async normalizeAudience(
+    tenantId: string,
+    audience?: CampaignAudienceDto,
+  ): Promise<NormalizedCampaignAudience> {
     const allOptedIn = audience?.allOptedIn === true;
     const contactIds = audience?.contactIds?.filter(Boolean) ?? [];
     const hasExplicitContacts = contactIds.length > 0;
+    const hasSegment = typeof audience?.segmentId === "string" && audience.segmentId.length > 0;
+    const modeCount = Number(allOptedIn) + Number(hasExplicitContacts) + Number(hasSegment);
 
-    if (allOptedIn === hasExplicitContacts) {
+    if (modeCount !== 1) {
       throw new BadRequestException(
-        "Campaign audience must specify exactly one of allOptedIn=true or a non-empty contactIds list",
+        "Campaign audience must specify exactly one of allOptedIn=true, a non-empty contactIds list, or segmentId",
       );
     }
 
     const language = audience?.language?.trim();
     const tagsAny = this.normalizeTags(audience?.tagsAny);
     const tagsAll = this.normalizeTags(audience?.tagsAll);
+
+    if (hasSegment) {
+      if (language || tagsAny.length > 0 || tagsAll.length > 0) {
+        throw new BadRequestException(
+          "Campaign audience cannot combine segmentId with language, tagsAny, or tagsAll",
+        );
+      }
+
+      const segment = await this.segments.resolveActiveForCampaign(tenantId, audience!.segmentId!);
+      return {
+        allOptedIn: false,
+        segmentId: segment.id,
+        segmentName: segment.name,
+        segmentUpdatedAt: segment.updatedAt.toISOString(),
+        ...segment.definition,
+      };
+    }
+
     return {
       allOptedIn,
       ...(hasExplicitContacts ? { contactIds } : {}),
@@ -468,6 +496,9 @@ export class CampaignsService {
     const candidate = value as {
       allOptedIn?: unknown;
       contactIds?: unknown;
+      segmentId?: unknown;
+      segmentName?: unknown;
+      segmentUpdatedAt?: unknown;
       language?: unknown;
       tagsAny?: unknown;
       tagsAll?: unknown;
@@ -477,7 +508,10 @@ export class CampaignsService {
       ? candidate.contactIds.filter((item): item is string => typeof item === "string")
       : undefined;
     const hasContacts = !!contactIds && contactIds.length > 0;
-    if (allOptedIn === hasContacts) {
+    const segmentId = typeof candidate.segmentId === "string" ? candidate.segmentId : undefined;
+    const hasSegment = !!segmentId;
+    const modeCount = Number(allOptedIn) + Number(hasContacts) + Number(hasSegment);
+    if (modeCount !== 1) {
       throw new UnprocessableEntityException("Campaign audience configuration is ambiguous");
     }
 
@@ -486,6 +520,11 @@ export class CampaignsService {
     return {
       allOptedIn,
       ...(hasContacts ? { contactIds } : {}),
+      ...(segmentId ? { segmentId } : {}),
+      ...(typeof candidate.segmentName === "string" ? { segmentName: candidate.segmentName } : {}),
+      ...(typeof candidate.segmentUpdatedAt === "string"
+        ? { segmentUpdatedAt: candidate.segmentUpdatedAt }
+        : {}),
       ...(typeof candidate.language === "string" && candidate.language.length > 0
         ? { language: candidate.language }
         : {}),
