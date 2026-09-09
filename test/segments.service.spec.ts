@@ -12,17 +12,30 @@ describe("SegmentsService", () => {
   const segmentUpdate = jest.fn();
   const segmentFindMany = jest.fn();
   const contactCount = jest.fn();
+  const auditCreate = jest.fn();
+
+  const transactionClient = {
+    contactSegment: {
+      create: segmentCreate,
+      update: segmentUpdate,
+    },
+    auditLog: {
+      create: auditCreate,
+    },
+  };
+  const runTransaction = jest.fn(
+    async (callback: (client: typeof transactionClient) => Promise<unknown>) => callback(transactionClient),
+  );
 
   const service = new SegmentsService({
     contactSegment: {
       findFirst: segmentFindFirst,
-      create: segmentCreate,
-      update: segmentUpdate,
       findMany: segmentFindMany,
     },
     contact: {
       count: contactCount,
     },
+    $transaction: runTransaction,
   } as never);
 
   beforeEach(() => {
@@ -35,6 +48,7 @@ describe("SegmentsService", () => {
       updatedAt: new Date(),
       ...data,
     }));
+    auditCreate.mockResolvedValue({ id: "audit-1" });
   });
 
   it("rejects a saved segment without a bounded criterion", async () => {
@@ -46,6 +60,7 @@ describe("SegmentsService", () => {
     ).rejects.toBeInstanceOf(BadRequestException);
 
     expect(segmentCreate).not.toHaveBeenCalled();
+    expect(runTransaction).not.toHaveBeenCalled();
   });
 
   it("normalizes name and reusable language/tag criteria before persistence", async () => {
@@ -63,6 +78,7 @@ describe("SegmentsService", () => {
       where: { tenantId: TENANT_ID, name: "VIP renewals" },
       select: { id: true },
     });
+    expect(runTransaction).toHaveBeenCalledTimes(1);
     expect(segmentCreate).toHaveBeenCalledWith({
       data: {
         tenantId: TENANT_ID,
@@ -75,6 +91,7 @@ describe("SegmentsService", () => {
         },
       },
     });
+    expect(auditCreate).not.toHaveBeenCalled();
   });
 
   it("rejects a duplicate segment name inside the tenant", async () => {
@@ -88,6 +105,7 @@ describe("SegmentsService", () => {
     ).rejects.toBeInstanceOf(ConflictException);
 
     expect(segmentCreate).not.toHaveBeenCalled();
+    expect(runTransaction).not.toHaveBeenCalled();
   });
 
   it("counts only opted-in contacts owned by the authenticated tenant", async () => {
