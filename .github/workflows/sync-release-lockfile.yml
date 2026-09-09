@@ -1,0 +1,34 @@
+name: Sync release lockfile metadata
+
+on:
+  push:
+    branches: [feature/metrics-trace-correlation]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Synchronize lockfile metadata without dependency updates
+        run: npm install --package-lock-only --ignore-scripts
+
+      - name: Commit synchronized lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync 0.13.0 lockfile metadata"
+            git push
+          fi
