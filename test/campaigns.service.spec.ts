@@ -10,6 +10,8 @@ const TENANT_ID = "123e4567-e89b-42d3-a456-426614174000";
 const CAMPAIGN_ID = "0f4ee5b2-f6ec-4cb2-b245-5799d1b40dce";
 const TEMPLATE_ID = "31ee3b2f-5fbd-44bb-a4aa-b252a3a66c12";
 const SENDER_ID = "1b7d45aa-b4df-47d9-b130-8c454faaf74b";
+const SEGMENT_ID = "f6e7b52b-03a2-4b13-84f9-f616de5d34f2";
+const SEGMENT_UPDATED_AT = new Date("2026-09-09T18:30:00.000Z");
 
 describe("CampaignsService", () => {
   const campaignCreate = jest.fn();
@@ -19,6 +21,7 @@ describe("CampaignsService", () => {
   const recipientUpdateMany = jest.fn();
   const resolveForTenant = jest.fn();
   const templateFindById = jest.fn();
+  const resolveActiveForCampaign = jest.fn();
 
   const transactionClient = {
     campaign: {
@@ -47,6 +50,7 @@ describe("CampaignsService", () => {
     } as never,
     { resolveForTenant } as never,
     { findById: templateFindById } as never,
+    { resolveActiveForCampaign } as never,
   );
 
   beforeEach(() => {
@@ -58,13 +62,23 @@ describe("CampaignsService", () => {
       status: "APPROVED",
       category: "MARKETING",
     });
+    resolveActiveForCampaign.mockResolvedValue({
+      id: SEGMENT_ID,
+      name: "VIP renewals",
+      updatedAt: SEGMENT_UPDATED_AT,
+      definition: {
+        language: "en_US",
+        tagsAny: ["renewal:2026", "vip"],
+        tagsAll: ["marketing"],
+      },
+    });
     campaignCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       id: CAMPAIGN_ID,
       ...data,
     }));
   });
 
-  it("requires an explicit audience mode and never defaults to all contacts", async () => {
+  it("requires exactly one explicit audience mode and never defaults to all contacts", async () => {
     await expect(
       service.create(TENANT_ID, {
         name: "Promo",
@@ -84,7 +98,19 @@ describe("CampaignsService", () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
 
+    await expect(
+      service.create(TENANT_ID, {
+        name: "Promo",
+        templateId: TEMPLATE_ID,
+        audience: {
+          allOptedIn: true,
+          segmentId: SEGMENT_ID,
+        },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
     expect(resolveForTenant).not.toHaveBeenCalled();
+    expect(resolveActiveForCampaign).not.toHaveBeenCalled();
     expect(campaignCreate).not.toHaveBeenCalled();
   });
 
@@ -100,7 +126,7 @@ describe("CampaignsService", () => {
     expect(resolveForTenant).not.toHaveBeenCalled();
   });
 
-  it("normalizes the campaign name and tag segmentation rules", async () => {
+  it("normalizes the campaign name and direct tag segmentation rules", async () => {
     await service.create(TENANT_ID, {
       name: "  September offer  ",
       templateId: TEMPLATE_ID,
@@ -128,6 +154,46 @@ describe("CampaignsService", () => {
       }),
       include: expect.any(Object),
     });
+  });
+
+  it("copies an active saved segment definition into the campaign draft", async () => {
+    await service.create(TENANT_ID, {
+      name: "Saved segment campaign",
+      templateId: TEMPLATE_ID,
+      audience: { segmentId: SEGMENT_ID },
+    });
+
+    expect(resolveActiveForCampaign).toHaveBeenCalledWith(TENANT_ID, SEGMENT_ID);
+    expect(campaignCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        audience: {
+          allOptedIn: false,
+          segmentId: SEGMENT_ID,
+          segmentName: "VIP renewals",
+          segmentUpdatedAt: SEGMENT_UPDATED_AT.toISOString(),
+          language: "en_US",
+          tagsAny: ["renewal:2026", "vip"],
+          tagsAll: ["marketing"],
+        },
+      }),
+      include: expect.any(Object),
+    });
+  });
+
+  it("rejects combining a saved segment with direct filters before resolving the segment", async () => {
+    await expect(
+      service.create(TENANT_ID, {
+        name: "Invalid segment mix",
+        templateId: TEMPLATE_ID,
+        audience: {
+          segmentId: SEGMENT_ID,
+          language: "en_US",
+        },
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(resolveActiveForCampaign).not.toHaveBeenCalled();
+    expect(resolveForTenant).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported personalization before resolving the sender when personalization is enabled", async () => {
