@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.10.0
+## Current release: 0.11.0
 
 The platform currently provides:
 
@@ -26,6 +26,8 @@ The platform currently provides:
 - Safe opt-in per-recipient template personalization
 - Multi-replica campaign processing with leases and crash recovery
 - Live campaign orchestration and WhatsApp delivery analytics
+- Public process liveness and dependency readiness probes
+- Tenant-scoped operational status/backlog diagnostics
 - Cursor-paginated message, template, campaign, recipient, and audit APIs
 - OpenAPI / Swagger
 - Docker-based local infrastructure
@@ -60,6 +62,7 @@ flowchart LR
     DB --> WebhookProcessor[Webhook Processor]
     WebhookProcessor --> DB
     DB --> Analytics[Live Campaign Analytics]
+    DB --> Operations[Tenant Operations Snapshot]
 ```
 
 HTTP requests do not wait for WhatsApp delivery. Outbound messages and their outbox intents are committed atomically before asynchronous publishing and delivery.
@@ -124,12 +127,48 @@ campaigns:read
 campaigns:write
 segments:read
 segments:write
+operations:read
 api_keys:read
 api_keys:write
 audit:read
 ```
 
 A delegated key cannot grant scopes that the actor key does not hold. Raw keys and key hashes are never returned by list or audit APIs.
+
+## Operational health and diagnostics
+
+Liveness and readiness are intentionally separate.
+
+```text
+GET /api/health
+GET /api/health/live
+GET /api/health/ready
+```
+
+`/api/health` remains a backward-compatible alias for process-only liveness. Liveness does not call PostgreSQL, Redis, RabbitMQ, Meta, or any other remote dependency.
+
+`/api/health/ready` concurrently checks PostgreSQL, Redis, and RabbitMQ with a bounded per-dependency timeout. It returns HTTP `200` only when all required dependencies are available and HTTP `503` with a structured dependency report otherwise. `HEALTH_DEPENDENCY_TIMEOUT_MS` defaults to `1500` ms and is bounded by the application.
+
+The public health response contains only dependency status, duration, and a coarse error classification (`not_configured`, `timeout`, or `unavailable`). It does not expose connection strings, broker topology, credentials, payloads, or exception text.
+
+Tenant operational diagnostics require `operations:read`:
+
+```text
+GET /api/v1/operations/snapshot
+```
+
+The snapshot includes only tenant-scoped counters:
+
+- message counts by current status;
+- outbound message counts by server-derived traffic class;
+- campaign counts by lifecycle status;
+- campaign-recipient counts by orchestration status;
+- unpublished transactional-outbox counts (`pending`, `due`, `leased`, `withErrors`);
+- age in seconds of the tenant's oldest unpublished message outbox event.
+
+Outbox metrics are joined through the tenant's persisted `Message` rows and restricted to the `message.outbound.requested` event. The API does not return message/customer identifiers, phone numbers, provider payloads, message bodies, or credentials.
+
+Global webhook backlog is deliberately not exposed by this tenant endpoint because `WebhookEvent` is not tenant-attributed in the current data model.
 
 ## WhatsApp senders
 
@@ -396,6 +435,8 @@ The durable processor handles inbound messages, outbound delivery receipts, and 
 - Deterministic campaign message idempotency
 - Conditional campaign lifecycle transitions
 - Durable signed webhook ingestion and retry
+- Explicit liveness/readiness separation for orchestration platforms
+- Tenant-scoped operational backlog inspection
 
 ## Production commands
 
@@ -419,6 +460,7 @@ DATABASE_URL
 REDIS_URL
 RABBITMQ_URL
 API_KEY_HASH_SECRET
+HEALTH_DEPENDENCY_TIMEOUT_MS
 META_GRAPH_API_VERSION
 META_APP_SECRET
 META_WEBHOOK_VERIFY_TOKEN
@@ -442,7 +484,7 @@ Never commit production credentials or tokens.
 
 ## Next implementation slices
 
-- observability, readiness, tracing, and alerting
+- distributed tracing, metrics export, and alerting
 - integration and load tests
 - dependency lockfile and supply-chain hardening
 - administrative audit coverage for sender/template/segment configuration changes
