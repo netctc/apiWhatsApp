@@ -1,4 +1,17 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnprocessableEntityException,
+} from "@nestjs/common";
+import type { AuditRequestContext } from "../audit/audit.types.js";
+import {
+  auditLogData,
+  changedFields,
+  mutationActor,
+} from "../audit/audit-write.util.js";
+import type { ApiPrincipal } from "../auth/auth.types.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { CreatePhoneNumberDto } from "./dto/create-phone-number.dto.js";
@@ -8,7 +21,13 @@ import { UpdatePhoneNumberDto } from "./dto/update-phone-number.dto.js";
 export class PhoneNumbersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(tenantId: string, dto: CreatePhoneNumberDto) {
+  async create(
+    tenantOrPrincipal: string | ApiPrincipal,
+    dto: CreatePhoneNumberDto,
+    auditContext?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(tenantOrPrincipal);
+    const tenantId = actor.tenantId;
     const providerConflict = await this.prisma.whatsAppPhoneNumber.findUnique({
       where: { providerPhoneNumberId: dto.providerPhoneNumberId },
     });
@@ -32,7 +51,7 @@ export class PhoneNumbersService {
           });
         }
 
-        return transaction.whatsAppPhoneNumber.create({
+        const created = await transaction.whatsAppPhoneNumber.create({
           data: {
             tenantId,
             providerPhoneNumberId: dto.providerPhoneNumberId,
@@ -44,10 +63,32 @@ export class PhoneNumbersService {
             isDefault,
           },
         });
+
+        const audit = auditLogData(
+          actor,
+          auditContext,
+          "whatsapp_phone_number.created",
+          "WhatsAppPhoneNumber",
+          created.id,
+          {
+            wabaConfigured: !!created.wabaId,
+            credentialConfigured: true,
+            rateLimitPerSecond: created.rateLimitPerSecond,
+            active: created.active,
+            isDefault: created.isDefault,
+          },
+        );
+        if (audit) {
+          await transaction.auditLog.create({ data: audit });
+        }
+
+        return created;
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        throw new ConflictException("Unable to register WhatsApp phone number because a unique sender constraint was violated");
+        throw new ConflictException(
+          "Unable to register WhatsApp phone number because a unique sender constraint was violated",
+        );
       }
       throw error;
     }
@@ -70,7 +111,14 @@ export class PhoneNumbersService {
     return phoneNumber;
   }
 
-  async update(tenantId: string, id: string, dto: UpdatePhoneNumberDto) {
+  async update(
+    tenantOrPrincipal: string | ApiPrincipal,
+    id: string,
+    dto: UpdatePhoneNumberDto,
+    auditContext?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(tenantOrPrincipal);
+    const tenantId = actor.tenantId;
     await this.assertWabaOwnership(tenantId, dto.wabaId);
 
     return this.prisma.$transaction(async (transaction) => {
@@ -125,7 +173,31 @@ export class PhoneNumbersService {
         }
       }
 
-      return transaction.whatsAppPhoneNumber.findUniqueOrThrow({ where: { id: updated.id } });
+      const finalState = await transaction.whatsAppPhoneNumber.findUniqueOrThrow({
+        where: { id: updated.id },
+      });
+      const audit = auditLogData(
+        actor,
+        auditContext,
+        "whatsapp_phone_number.updated",
+        "WhatsAppPhoneNumber",
+        finalState.id,
+        {
+          changedFields: changedFields(dto as Record<string, unknown>, {
+            credentialRef: "credential",
+          }),
+          credentialChanged: dto.credentialRef !== undefined,
+          wabaConfigured: !!finalState.wabaId,
+          rateLimitPerSecond: finalState.rateLimitPerSecond,
+          active: finalState.active,
+          isDefault: finalState.isDefault,
+        },
+      );
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+
+      return finalState;
     });
   }
 
