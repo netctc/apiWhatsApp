@@ -45,7 +45,9 @@ export class DistributedRateLimiterService implements OnModuleDestroy {
     configuredLimit?: number,
   ): Promise<void> {
     const defaultLimit = Number(this.config.get("DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND") ?? 75);
-    const limit = Math.max(1, configuredLimit ?? defaultLimit);
+    const candidateLimit = configuredLimit ?? defaultLimit;
+    const limit =
+      Number.isFinite(candidateLimit) && candidateLimit > 0 ? Math.max(1, Math.floor(candidateLimit)) : 75;
     const reservationWindowMs = this.reservationWindowMs();
 
     for (;;) {
@@ -56,7 +58,9 @@ export class DistributedRateLimiterService implements OnModuleDestroy {
       const window = Math.floor(now / 1000);
       const canBorrow = elapsed >= reservationWindowMs;
       const classLimit = canBorrow ? limit : this.reservedClassLimit(limit, trafficClass);
-      const totalKey = `rate:whatsapp:outbound:${phoneNumberId}:${window}:total`;
+
+      // Keep the pre-0.6 total key shape so old and new workers share one sender limit during rolling upgrades.
+      const totalKey = `rate:whatsapp:outbound:${phoneNumberId}:${window}`;
       const classKey = `rate:whatsapp:outbound:${phoneNumberId}:${window}:${trafficClass.toLowerCase()}`;
 
       const accepted = await this.redis.eval(
@@ -88,14 +92,26 @@ export class DistributedRateLimiterService implements OnModuleDestroy {
   }
 
   private reservedClassLimit(limit: number, trafficClass: MessageTrafficClass): number {
+    const shares = this.reservationShares();
     switch (trafficClass) {
       case MessageTrafficClass.OTP:
         return limit;
       case MessageTrafficClass.TRANSACTIONAL:
-        return Math.max(1, Math.floor(limit * this.share("OUTBOUND_TRANSACTIONAL_MAX_SHARE", 0.6)));
+        return Math.max(1, Math.floor(limit * shares.transactional));
       case MessageTrafficClass.MARKETING:
-        return Math.max(1, Math.floor(limit * this.share("OUTBOUND_MARKETING_MAX_SHARE", 0.2)));
+        return Math.max(1, Math.floor(limit * shares.marketing));
     }
+  }
+
+  private reservationShares(): { transactional: number; marketing: number } {
+    const transactional = this.share("OUTBOUND_TRANSACTIONAL_MAX_SHARE", 0.6);
+    const marketing = this.share("OUTBOUND_MARKETING_MAX_SHARE", 0.2);
+
+    // Preserve at least 10% headroom for OTP during the reservation phase.
+    if (transactional + marketing > 0.9) {
+      return { transactional: 0.6, marketing: 0.2 };
+    }
+    return { transactional, marketing };
   }
 
   private reservationWindowMs(): number {
