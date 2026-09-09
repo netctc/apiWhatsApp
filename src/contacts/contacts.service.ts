@@ -26,6 +26,7 @@ export class ContactsService {
         name: dto.name,
         language: dto.language,
         timezone: dto.timezone,
+        tags: dto.tags !== undefined ? this.normalizeTags(dto.tags) : undefined,
         metadata: dto.metadata ? this.toJson(dto.metadata) : undefined,
       },
     });
@@ -63,6 +64,7 @@ export class ContactsService {
         name: dto.name,
         language: dto.language,
         timezone: dto.timezone,
+        tags: dto.tags !== undefined ? this.normalizeTags(dto.tags) : undefined,
         metadata: dto.metadata ? this.toJson(dto.metadata) : undefined,
       },
     });
@@ -129,6 +131,10 @@ export class ContactsService {
       orderBy: { occurredAt: "desc" },
       take: 100,
     });
+  }
+
+  private normalizeTags(tags: string[]): string[] {
+    return [...new Set(tags.map((tag) => tag.trim().toLowerCase()))].sort();
   }
 
   private toJson(value: unknown): Prisma.InputJsonValue {
