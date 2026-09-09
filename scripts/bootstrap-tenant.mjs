@@ -56,6 +56,8 @@ try {
           "templates:write",
           "campaigns:read",
           "campaigns:write",
+          "segments:read",
+          "segments:write",
           "api_keys:read",
           "api_keys:write",
           "audit:read",

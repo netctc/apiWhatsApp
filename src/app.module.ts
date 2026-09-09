@@ -11,6 +11,7 @@ import { OutboxModule } from "./outbox/outbox.module.js";
 import { PhoneNumbersModule } from "./phone-numbers/phone-numbers.module.js";
 import { PrismaModule } from "./prisma/prisma.module.js";
 import { QueueModule } from "./queue/queue.module.js";
+import { SegmentsModule } from "./segments/segments.module.js";
 import { TemplatesModule } from "./templates/templates.module.js";
 import { WebhooksModule } from "./webhooks/webhooks.module.js";
 
@@ -22,6 +23,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module.js";
     ApiKeysModule,
     AuditModule,
     ContactsModule,
+    SegmentsModule,
     PhoneNumbersModule,
     TemplatesModule,
     CampaignsModule,

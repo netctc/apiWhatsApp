@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.9.0
+## Current release: 0.10.0
 
 The platform currently provides:
 
@@ -11,6 +11,7 @@ The platform currently provides:
 - Tenant isolation with scoped API keys
 - API key lifecycle and append-only audit logs
 - Contacts, normalized tags, consent history, and 24-hour service windows
+- Reusable saved contact segments with bounded/indexable criteria
 - Multiple WhatsApp senders per tenant with runtime secret references
 - WABA template synchronization and lifecycle status tracking
 - Local `APPROVED` template enforcement before outbox creation
@@ -20,8 +21,8 @@ The platform currently provides:
 - Transactional outbox
 - Signed Meta webhook ingestion and durable asynchronous processing
 - Inbound message persistence and delivery receipt processing
-- Marketing campaign orchestration with explicit audience snapshots
-- Tag-based campaign segmentation
+- Marketing campaign orchestration with immutable audience snapshots
+- Direct and saved-segment campaign targeting
 - Safe opt-in per-recipient template personalization
 - Multi-replica campaign processing with leases and crash recovery
 - Live campaign orchestration and WhatsApp delivery analytics
@@ -36,7 +37,9 @@ flowchart LR
     Client[CRM / ERP / Application] --> Auth[X-API-Key]
     Auth --> API[REST API]
     API --> DB[(PostgreSQL)]
-    API --> Campaign[Campaign Snapshot]
+    API --> Segment[Saved Segment]
+    Segment --> DB
+    API --> Campaign[Campaign Draft]
     Campaign --> DB
     DB --> CampaignProcessor[Campaign Processor]
     CampaignProcessor --> Policy[Shared Message Policy]
@@ -119,6 +122,8 @@ templates:read
 templates:write
 campaigns:read
 campaigns:write
+segments:read
+segments:write
 api_keys:read
 api_keys:write
 audit:read
@@ -184,9 +189,9 @@ whatsapp.outbound.marketing
 
 The legacy base queue remains consumed as transactional traffic during rolling upgrades.
 
-## Contacts and segmentation tags
+## Contacts and tags
 
-Contacts support normalized lowercase tags for deterministic segmentation:
+Contacts support normalized lowercase tags:
 
 ```json
 {
@@ -204,6 +209,46 @@ Contacts support normalized lowercase tags for deterministic segmentation:
 
 Tags are validated as bounded slug-like values, normalized to lowercase, deduplicated, and stored in a PostgreSQL string array with a GIN index.
 
+## Saved contact segments
+
+Reusable segments are tenant-scoped named definitions over bounded, indexable contact attributes. They do not accept arbitrary JSON predicates, SQL fragments, JavaScript, JSONPath, or expression languages.
+
+Supported criteria:
+
+```text
+language   exact match
+tagsAny    contact has at least one tag
+tagsAll    contact has every tag
+```
+
+Every saved segment must contain at least one criterion. Segment evaluation always adds tenant ownership and `OPTED_IN` on the server.
+
+Endpoints:
+
+```text
+POST  /api/v1/segments
+GET   /api/v1/segments
+GET   /api/v1/segments/{segmentId}
+GET   /api/v1/segments/{segmentId}/count
+PATCH /api/v1/segments/{segmentId}
+```
+
+Example:
+
+```json
+{
+  "name": "VIP renewals",
+  "description": "Opted-in VIP contacts eligible for renewal campaigns.",
+  "definition": {
+    "language": "en_US",
+    "tagsAny": ["renewal:2026", "vip"],
+    "tagsAll": ["marketing"]
+  }
+}
+```
+
+Definitions are normalized before persistence. `GET /segments/{id}/count` evaluates the current contact population and returns an observation timestamp. Inactive segments remain readable/countable for administration but cannot be attached to a new campaign.
+
 ## Campaigns
 
 Campaigns require a synchronized `APPROVED` `MARKETING` template. Sender and template must belong to the same WABA.
@@ -220,16 +265,35 @@ POST /api/v1/campaigns/{campaignId}/resume
 POST /api/v1/campaigns/{campaignId}/cancel
 ```
 
-### Explicit audience snapshot
+### Explicit audience modes
 
 A campaign must choose exactly one base audience:
 
-- `allOptedIn=true`, or
-- a non-empty `contactIds` list.
+- `allOptedIn=true`;
+- a non-empty `contactIds` list; or
+- an active saved `segmentId`.
 
-Optional `language`, `tagsAny`, and `tagsAll` filters only narrow that explicit base audience; they never implicitly expand it to all contacts.
+Direct `language`, `tagsAny`, and `tagsAll` filters can narrow the first two modes. They cannot be combined with `segmentId` because a saved segment already owns its definition.
 
-Launch executes under a campaign row lock and repeatable-read transaction, selecting only currently `OPTED_IN` contacts and creating an immutable `CampaignRecipient` snapshot. `CAMPAIGN_MAX_RECIPIENTS` has an absolute 50,000-recipient safety cap in this release.
+Example using a saved segment:
+
+```json
+{
+  "name": "September VIP renewal",
+  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d",
+  "templateId": "31ee3b2f-5fbd-44bb-a4aa-b252a3a66c12",
+  "audience": {
+    "segmentId": "f6e7b52b-03a2-4b13-84f9-f616de5d34f2"
+  },
+  "scheduledAt": "2026-09-10T09:00:00Z"
+}
+```
+
+When the draft is created, the service resolves only an active segment owned by the authenticated tenant and copies the normalized definition into `Campaign.audience` together with source metadata (`segmentId`, `segmentName`, `segmentUpdatedAt`).
+
+This copy is intentional. Launch never re-reads the live segment. Editing or deactivating the saved segment later does not silently change the definition of a campaign draft that already exists.
+
+Launch executes under a campaign row lock and repeatable-read transaction, selecting only currently `OPTED_IN` contacts and creating an immutable `CampaignRecipient` snapshot. `CAMPAIGN_MAX_RECIPIENTS` has an absolute 50,000-recipient safety cap.
 
 Consent is checked again immediately before message creation. A contact that opts out after the snapshot is marked `SKIPPED` and receives no new message.
 
@@ -271,23 +335,9 @@ If a process creates the message and crashes before linking the recipient, a lat
 GET /api/v1/campaigns/{campaignId}/analytics
 ```
 
-The endpoint requires `campaigns:read` and verifies tenant ownership before running analytics queries.
+The endpoint requires `campaigns:read`, verifies tenant ownership, and reads directly from authoritative `CampaignRecipient` and linked `Message` records.
 
-It reads directly from authoritative `CampaignRecipient` and linked `Message` rows. Webhook processing does not maintain a second set of delivery counters, avoiding counter drift.
-
-The response includes:
-
-- campaign lifecycle metadata;
-- recipient snapshot count and every `CampaignRecipientStatus` count;
-- terminal recipient count;
-- cumulative message milestones: `created`, `submitted`, `sent`, `delivered`, `read`, `failed`;
-- current `MessageStatus` distribution;
-- a snapshot-vs-stored-total consistency signal;
-- `generatedAt` for the read time.
-
-Cumulative milestones use persisted timestamps (`submittedAt`, `sentAt`, `deliveredAt`, `readAt`, `failedAt`). A message currently at `READ`, for example, still contributes to its earlier submitted and delivered milestones.
-
-Rates are percentages on a `0-100` scale:
+It returns orchestration status counts, cumulative created/submitted/sent/delivered/read/failed milestones, current message status distribution, consistency signaling, and percentage rates:
 
 ```text
 messageCreationRate = created / snapshotRecipients
@@ -297,7 +347,7 @@ readRate            = read / delivered
 failureRate         = failed / created
 ```
 
-A rate is `null` when its denominator is zero. Analytics are live reads rather than a long repeatable-read transaction, so a webhook committed between aggregate queries can be reflected in one portion of the response before another. `generatedAt` identifies the observation time and the next read converges on the latest persisted state.
+Rates use a `0-100` scale and are `null` when the denominator is zero. Analytics are live observations and include `generatedAt`.
 
 ## Messaging API
 
@@ -392,14 +442,13 @@ Never commit production credentials or tokens.
 
 ## Next implementation slices
 
-- richer saved segments without arbitrary query expressions
-- audit coverage for additional administrative configuration actions
-- provider-backed secret stores beyond environment references
-- media messages and media storage
-- agent inbox and conversation assignment
 - observability, readiness, tracing, and alerting
 - integration and load tests
 - dependency lockfile and supply-chain hardening
+- administrative audit coverage for sender/template/segment configuration changes
+- provider-backed secret stores beyond environment references
+- media messages and media storage
+- agent inbox and conversation assignment
 
 ## Repository workflow
 

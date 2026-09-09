@@ -12,6 +12,8 @@ export enum ApiScope {
   TEMPLATES_WRITE = "templates:write",
   CAMPAIGNS_READ = "campaigns:read",
   CAMPAIGNS_WRITE = "campaigns:write",
+  SEGMENTS_READ = "segments:read",
+  SEGMENTS_WRITE = "segments:write",
   API_KEYS_READ = "api_keys:read",
   API_KEYS_WRITE = "api_keys:write",
   AUDIT_READ = "audit:read",
