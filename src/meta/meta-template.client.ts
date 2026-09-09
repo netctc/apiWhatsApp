@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { MetaApiError } from "./meta-api.error.js";
+import { metaGraphUrl } from "./meta-graph-url.util.js";
 import { MetaSenderResolverService } from "./meta-sender-resolver.service.js";
 
 export interface MetaMessageTemplate {
@@ -41,7 +42,10 @@ export class MetaTemplateClient {
     const seenCursors = new Set<string>();
 
     for (let page = 0; page < 100; page += 1) {
-      const url = new URL(`https://graph.facebook.com/${graphVersion}/${context.wabaId}/message_templates`);
+      const url = metaGraphUrl(
+        this.config,
+        `${graphVersion}/${encodeURIComponent(context.wabaId)}/message_templates`,
+      );
       url.searchParams.set(
         "fields",
         "id,name,language,status,category,components,quality_score,rejected_reason",
@@ -96,7 +100,7 @@ export class MetaTemplateClient {
         method: "GET",
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          "User-Agent": "apiWhatsApp/0.5",
+          "User-Agent": "apiWhatsApp/0.14",
         },
         signal: AbortSignal.timeout(timeoutMs),
       });

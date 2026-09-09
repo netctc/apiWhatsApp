@@ -55,9 +55,83 @@ jobs:
       - name: Block installed high or critical runtime vulnerabilities
         run: npm run audit:prod
 
+  integration:
+    runs-on: ubuntu-latest
+    needs: [build]
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/api_whatsapp_integration?schema=public
+      REDIS_URL: redis://localhost:6379
+      RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      API_KEY_HASH_SECRET: integration-api-key-hash-secret-0123456789abcdef
+      META_GRAPH_API_VERSION: v99.0
+      META_HTTP_TIMEOUT_MS: "3000"
+      META_APP_SECRET: integration-meta-app-secret
+      META_WEBHOOK_VERIFY_TOKEN: integration-verify-token
+      TEST_META_ACCESS_TOKEN: integration-meta-access-token
+      INTEGRATION_BURST_MESSAGES: "50"
+      INTEGRATION_ACCEPT_P95_MS: "3000"
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: api_whatsapp_integration
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d api_whatsapp_integration"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Apply production migrations
+        run: npm run prisma:deploy
+
+      - name: Run real integration and load smoke tests
+        run: npm run test:integration
+
   docker-build:
     runs-on: ubuntu-latest
-    needs: [build, runtime-security]
+    needs: [build, runtime-security, integration]
 
     steps:
       - name: Checkout repository
