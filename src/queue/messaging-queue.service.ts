@@ -1,11 +1,16 @@
-import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
+import { Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
 import amqp, { type ChannelModel, type ConfirmChannel, type ConsumeMessage } from "amqplib";
 import { MessageTrafficClass } from "../generated/prisma/client.js";
+import {
+  TraceContextService,
+  type TraceCarrier,
+} from "../observability/trace-context.service.js";
 
 export interface OutboundQueueJob {
   messageId: string;
   attempt: number;
   trafficClass: MessageTrafficClass;
+  trace?: TraceCarrier;
 }
 
 export interface QueueProcessingResult {
@@ -29,13 +34,19 @@ export class MessagingQueueService implements OnModuleDestroy {
   private publisherChannel?: ConfirmChannel;
   private readonly consumerChannels = new Map<string, ConfirmChannel>();
 
-  async publishOutboundMessage(messageId: string, trafficClass: MessageTrafficClass): Promise<void> {
+  constructor(@Optional() private readonly traceContext?: TraceContextService) {}
+
+  async publishOutboundMessage(
+    messageId: string,
+    trafficClass: MessageTrafficClass,
+    trace?: TraceCarrier,
+  ): Promise<void> {
     const channel = await this.getPublisherChannel();
     await this.assertTrafficTopology(channel, trafficClass);
 
     channel.sendToQueue(
       this.trafficQueueName(trafficClass),
-      Buffer.from(JSON.stringify({ messageId, trafficClass })),
+      Buffer.from(JSON.stringify({ messageId, trafficClass, ...(trace ? { trace } : {}) })),
       {
         persistent: true,
         contentType: "application/json",
@@ -44,6 +55,7 @@ export class MessagingQueueService implements OnModuleDestroy {
         headers: {
           "x-retry-count": 0,
           "x-traffic-class": trafficClass,
+          ...this.traceHeaders(trace),
         },
       },
     );
@@ -132,7 +144,12 @@ export class MessagingQueueService implements OnModuleDestroy {
     }
 
     const attempt = this.retryCount(message);
-    const job: OutboundQueueJob = { messageId: parsed.messageId, attempt, trafficClass };
+    const job: OutboundQueueJob = {
+      messageId: parsed.messageId,
+      attempt,
+      trafficClass,
+      ...(parsed.trace ? { trace: parsed.trace } : {}),
+    };
 
     try {
       const result = await handler(job);
@@ -142,7 +159,13 @@ export class MessagingQueueService implements OnModuleDestroy {
       }
 
       if (result.action === "dead") {
-        await this.publishDeadLetter(channel, trafficClass, job.messageId, result.reason);
+        await this.publishDeadLetter(
+          channel,
+          trafficClass,
+          job.messageId,
+          result.reason,
+          job.trace,
+        );
         channel.ack(message);
         return;
       }
@@ -155,6 +178,7 @@ export class MessagingQueueService implements OnModuleDestroy {
           trafficClass,
           job.messageId,
           result.reason ?? "Retry policy exhausted",
+          job.trace,
         );
       }
       channel.ack(message);
@@ -181,7 +205,13 @@ export class MessagingQueueService implements OnModuleDestroy {
     const retryQueue = this.trafficRetryQueueName(job.trafficClass, delay);
     channel.sendToQueue(
       retryQueue,
-      Buffer.from(JSON.stringify({ messageId: job.messageId, trafficClass: job.trafficClass })),
+      Buffer.from(
+        JSON.stringify({
+          messageId: job.messageId,
+          trafficClass: job.trafficClass,
+          ...(job.trace ? { trace: job.trace } : {}),
+        }),
+      ),
       {
         persistent: true,
         contentType: "application/json",
@@ -190,6 +220,7 @@ export class MessagingQueueService implements OnModuleDestroy {
         headers: {
           "x-retry-count": job.attempt + 1,
           "x-traffic-class": job.trafficClass,
+          ...this.traceHeaders(job.trace),
           ...(reason ? { "x-last-error": reason.slice(0, 512) } : {}),
         },
       },
@@ -207,6 +238,7 @@ export class MessagingQueueService implements OnModuleDestroy {
     trafficClass: MessageTrafficClass,
     messageId?: string,
     reason?: string,
+    trace?: TraceCarrier,
   ): Promise<void> {
     channel.sendToQueue(
       this.trafficDeadQueueName(trafficClass),
@@ -216,6 +248,7 @@ export class MessagingQueueService implements OnModuleDestroy {
           trafficClass,
           reason: reason ?? "Unknown failure",
           failedAt: new Date().toISOString(),
+          ...(trace ? { trace } : {}),
         }),
       ),
       {
@@ -223,7 +256,10 @@ export class MessagingQueueService implements OnModuleDestroy {
         contentType: "application/json",
         messageId,
         timestamp: Date.now(),
-        headers: { "x-traffic-class": trafficClass },
+        headers: {
+          "x-traffic-class": trafficClass,
+          ...this.traceHeaders(trace),
+        },
       },
     );
     await channel.waitForConfirms();
@@ -318,15 +354,40 @@ export class MessagingQueueService implements OnModuleDestroy {
     return this.connection;
   }
 
-  private parseMessage(message: ConsumeMessage): { messageId: string } | undefined {
+  private parseMessage(message: ConsumeMessage):
+    | { messageId: string; trace?: TraceCarrier }
+    | undefined {
     try {
-      const value = JSON.parse(message.content.toString("utf8")) as { messageId?: unknown };
-      return typeof value.messageId === "string" && value.messageId.length > 0
-        ? { messageId: value.messageId }
-        : undefined;
+      const value = JSON.parse(message.content.toString("utf8")) as {
+        messageId?: unknown;
+        trace?: unknown;
+      };
+      if (typeof value.messageId !== "string" || value.messageId.length === 0) {
+        return undefined;
+      }
+      const trace = this.traceContext?.parseCarrier(value.trace);
+      return {
+        messageId: value.messageId,
+        ...(trace ? { trace } : {}),
+      };
     } catch {
       return undefined;
     }
+  }
+
+  private traceHeaders(trace?: TraceCarrier): Record<string, string> {
+    if (!trace) {
+      return {};
+    }
+    return {
+      "x-trace-id": trace.traceId,
+      ...(trace.requestId ? { "x-request-id": trace.requestId } : {}),
+      ...(trace.parentSpanId
+        ? {
+            traceparent: `00-${trace.traceId}-${trace.parentSpanId}-${trace.traceFlags ?? "01"}`,
+          }
+        : {}),
+    };
   }
 
   private retryCount(message: ConsumeMessage): number {
