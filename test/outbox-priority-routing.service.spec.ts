@@ -1,11 +1,13 @@
 import { jest } from "@jest/globals";
 import { MessageTrafficClass } from "../src/generated/prisma/client.js";
+import { TraceContextService } from "../src/observability/trace-context.service.js";
 import { OutboxPublisherService } from "../src/outbox/outbox-publisher.service.js";
 
 describe("OutboxPublisherService traffic routing", () => {
   const messageFindUnique = jest.fn();
   const outboxUpdate = jest.fn();
   const publishOutboundMessage = jest.fn();
+  const traceContext = new TraceContextService();
 
   const service = new OutboxPublisherService(
     {
@@ -13,6 +15,7 @@ describe("OutboxPublisherService traffic routing", () => {
       outboxEvent: { update: outboxUpdate },
     } as never,
     { publishOutboundMessage } as never,
+    traceContext,
   );
 
   const privateService = service as unknown as {
@@ -50,6 +53,54 @@ describe("OutboxPublisherService traffic routing", () => {
         lastError: null,
       }),
     });
+  });
+
+  it("passes a valid persisted trace carrier into the queue publisher", async () => {
+    messageFindUnique.mockResolvedValue({ trafficClass: MessageTrafficClass.TRANSACTIONAL });
+    const trace = {
+      traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+      parentSpanId: "00f067aa0ba902b7",
+      traceFlags: "01",
+      requestId: "req-123",
+    };
+
+    await privateService.publish(
+      "event-trace",
+      "message.outbound.requested",
+      "message-trace",
+      {
+        messageId: "message-trace",
+        trafficClass: MessageTrafficClass.TRANSACTIONAL,
+        trace,
+      },
+      1,
+    );
+
+    expect(publishOutboundMessage).toHaveBeenCalledWith(
+      "message-trace",
+      MessageTrafficClass.TRANSACTIONAL,
+      trace,
+    );
+  });
+
+  it("ignores invalid trace metadata rather than blocking message publication", async () => {
+    messageFindUnique.mockResolvedValue({ trafficClass: MessageTrafficClass.TRANSACTIONAL });
+
+    await privateService.publish(
+      "event-invalid-trace",
+      "message.outbound.requested",
+      "message-invalid-trace",
+      {
+        messageId: "message-invalid-trace",
+        trace: { traceId: "invalid" },
+      },
+      1,
+    );
+
+    expect(publishOutboundMessage).toHaveBeenCalledWith(
+      "message-invalid-trace",
+      MessageTrafficClass.TRANSACTIONAL,
+    );
   });
 
   it("does not publish when outbox JSON disagrees with the persisted class", async () => {
