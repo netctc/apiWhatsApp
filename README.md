@@ -2,11 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API built for reliable high-volume messaging through Meta Cloud API.
 
-## Engineering language
-
-English is the primary language for source code, technical documentation, API contracts, commit messages, logs, and operational tooling.
-
-## Current release: 0.4.0
+## Current release: 0.5.0
 
 The platform currently provides:
 
@@ -18,6 +14,9 @@ The platform currently provides:
 - Contacts and immutable consent history
 - Multiple WhatsApp senders per tenant
 - Runtime secret references instead of raw Meta tokens in PostgreSQL
+- Tenant/WABA message-template synchronization and status tracking
+- Local enforcement that outbound templates are synchronized and `APPROVED`
+- Durable `message_template_status_update` webhook processing
 - Transactional outbox
 - RabbitMQ workers with delayed retries and DLQ
 - Redis per-phone-number distributed rate limiting
@@ -28,7 +27,7 @@ The platform currently provides:
 - 24-hour customer service window enforcement
 - Signed Meta webhook verification
 - Delivery status processing (`sent`, `delivered`, `read`, `failed`)
-- Cursor-paginated message and audit APIs
+- Cursor-paginated message, template, and audit APIs
 - OpenAPI / Swagger
 - Docker-based local infrastructure
 - Versioned database migrations
@@ -52,11 +51,13 @@ flowchart LR
     Webhook --> DB
     DB --> Processor[Webhook Processor]
     Processor --> DB
+    API --> TemplateSync[Template Sync]
+    TemplateSync --> Meta
 ```
 
 Outbound HTTP requests do not wait for WhatsApp delivery. The message and queue intent are committed atomically in PostgreSQL and delivered asynchronously.
 
-Inbound webhook requests are signature-verified and persisted before asynchronous processing. `metadata.phone_number_id` resolves the configured sender and owning tenant.
+Inbound and template-status webhook requests are signature-verified and durably persisted before asynchronous processing.
 
 ## Requirements
 
@@ -65,6 +66,7 @@ Inbound webhook requests are signature-verified and persisted before asynchronou
 - Docker and Docker Compose
 - Meta application with WhatsApp Business Platform access
 - One or more WhatsApp Business phone numbers
+- WABA ID configured on each sender that will use templates
 - Meta access token for every configured sender
 - Meta app secret and webhook verify token
 
@@ -98,17 +100,9 @@ Start the worker in another process:
 npm run start:worker:dev
 ```
 
-API base URL:
+API base URL: `http://localhost:3000/api`
 
-```text
-http://localhost:3000/api
-```
-
-Swagger:
-
-```text
-http://localhost:3000/docs
-```
+Swagger: `http://localhost:3000/docs`
 
 ## Authentication and authorization
 
@@ -129,6 +123,8 @@ contacts:read
 contacts:write
 phone_numbers:read
 phone_numbers:write
+templates:read
+templates:write
 api_keys:read
 api_keys:write
 audit:read
@@ -138,85 +134,18 @@ The bootstrap command creates a full administrative key. Use the lifecycle API t
 
 ## API key lifecycle
 
-### Create a delegated key
-
-```http
+```text
 POST /api/v1/api-keys
-X-API-Key: <admin-api-key>
-Content-Type: application/json
-```
-
-```json
-{
-  "name": "crm-production",
-  "scopes": ["messages:read", "messages:write", "contacts:read"]
-}
-```
-
-The response includes the raw API key once:
-
-```json
-{
-  "apiKey": "wapi_<prefix>_<secret>",
-  "key": {
-    "id": "...",
-    "name": "crm-production",
-    "prefix": "...",
-    "scopes": ["messages:read", "messages:write", "contacts:read"],
-    "active": true
-  }
-}
-```
-
-A key cannot grant a scope that it does not itself hold. This prevents delegated credentials from escalating privileges.
-
-### List keys
-
-```http
-GET /api/v1/api-keys
-```
-
-The listing never returns raw secrets or `keyHash` values.
-
-### Revoke a key
-
-```http
+GET  /api/v1/api-keys
 POST /api/v1/api-keys/{apiKeyId}/revoke
+GET  /api/v1/audit-logs
 ```
 
-Revocation is idempotent. Creating and revoking keys writes an audit record in the same PostgreSQL transaction as the credential change.
-
-## Audit log
-
-Administrative audit events are append-only from the public API.
-
-```http
-GET /api/v1/audit-logs?limit=50
-X-API-Key: <key-with-audit:read>
-```
-
-Supported filters:
-
-```text
-action=<exact action>
-entityType=<entity type>
-entityId=<entity id>
-cursor=<audit UUID>
-limit=1..100
-```
-
-Current key lifecycle actions include:
-
-```text
-api_key.created
-api_key.revoked
-```
-
-Audit records contain tenant, actor key ID, action, entity reference, safe metadata, source IP when available, user agent, and timestamp. Raw API keys and API-key hashes are not written to audit metadata.
+Raw API keys are returned only at creation time. List responses and audit metadata never expose raw secrets or `keyHash` values. A delegated key cannot grant scopes it does not itself hold.
 
 ## WhatsApp phone numbers / senders
 
-Store the Meta access token in the runtime environment or deployment secret manager:
+Store each Meta access token in the runtime environment or deployment secret manager:
 
 ```text
 META_ACME_WHATSAPP_TOKEN=<meta-access-token>
@@ -240,7 +169,7 @@ POST /api/v1/phone-numbers
 }
 ```
 
-The raw Meta token is never persisted in PostgreSQL.
+The raw Meta token is never persisted in PostgreSQL. A WABA cannot be assigned to multiple tenants through sender configuration.
 
 Sender endpoints:
 
@@ -251,9 +180,79 @@ GET   /api/v1/phone-numbers/{senderId}
 PATCH /api/v1/phone-numbers/{senderId}
 ```
 
-If the active default sender is disabled, another active sender is promoted automatically when available.
+## Message template lifecycle
 
-## Contacts and consent
+Templates are synchronized at WABA level. The sync endpoint resolves the WABA and its Meta credential from a tenant sender; callers do not submit an access token.
+
+### Synchronize templates
+
+```http
+POST /api/v1/templates/sync
+X-API-Key: <key-with-templates:write>
+Content-Type: application/json
+```
+
+Use the active default sender:
+
+```json
+{}
+```
+
+Or choose a specific tenant sender/WABA:
+
+```json
+{
+  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d"
+}
+```
+
+The service reads all pages from Meta before modifying the local catalog. If remote pagination is incomplete or an API request fails, the sync is aborted. After a successful complete sync, local templates missing remotely are marked `DELETED` rather than physically removed.
+
+### List templates
+
+```http
+GET /api/v1/templates?status=APPROVED&language=en_US&limit=50
+X-API-Key: <key-with-templates:read>
+```
+
+Supported filters:
+
+```text
+wabaId=<Meta WABA ID>
+status=<provider status>
+category=<provider category>
+language=<language code>
+name=<case-insensitive name search>
+cursor=<template UUID>
+limit=1..100
+```
+
+Get one template:
+
+```http
+GET /api/v1/templates/{templateId}
+```
+
+Template status is stored as a normalized string rather than a database enum so new Meta lifecycle states can be persisted without an emergency schema change.
+
+### Template status webhooks
+
+The durable webhook processor handles Meta `message_template_status_update` events. `entry.id` is treated as the WABA ID and must resolve unambiguously to one configured tenant. Unknown or cross-tenant-ambiguous WABAs fail closed and the raw webhook remains retryable.
+
+Status events update the local template immediately, including rejection reason when supplied. This keeps `APPROVED`, `REJECTED`, `DISABLED`, `DELETED`, and future provider statuses aligned without requiring a manual sync after every lifecycle transition.
+
+### Outbound template enforcement
+
+A new `TEMPLATE` message must satisfy all of the following before an outbox event is created:
+
+1. The contact satisfies the existing template consent policy.
+2. The selected sender is active and has a WABA ID.
+3. The template `name + language` exists for that tenant/WABA.
+4. The local template status is exactly `APPROVED`.
+
+An idempotent retry of an already-created logical message still returns the existing message before re-evaluating current template state.
+
+## Contacts, consent, and service window
 
 ```text
 POST  /api/v1/contacts
@@ -264,28 +263,13 @@ POST  /api/v1/contacts/{contactId}/consents
 GET   /api/v1/contacts/{contactId}/consents
 ```
 
-Consent events are retained as an immutable history. An older imported event cannot overwrite a newer current decision.
+Consent events are retained as an immutable history. Template messages require explicit `OPTED_IN` consent.
 
-Template messages require explicit `OPTED_IN` consent.
-
-## 24-hour customer service window
-
-An inbound user message opens or extends the contact's service window to 24 hours after that user message.
-
-The contact stores:
-
-```text
-lastInboundAt
-serviceWindowExpiresAt
-```
-
-Free-form `TEXT` messages require an open service window. Outside the window, use an approved `TEMPLATE` message and satisfy the template opt-in policy.
-
-Delayed or duplicate webhooks cannot shorten a window opened by a newer inbound user message.
+An inbound user message opens or extends the contact service window to 24 hours after that user message. Free-form `TEXT` messages require an open service window; outside it, use an approved `TEMPLATE` message.
 
 ## Messaging API
 
-### Send
+Send:
 
 ```http
 POST /api/v1/messages
@@ -312,6 +296,7 @@ Template example:
 {
   "to": "+96170123456",
   "type": "TEMPLATE",
+  "senderId": "a5f4b844-1d12-437f-b7e5-702dd592da9d",
   "payload": {
     "name": "order_confirmation",
     "language": "en_US",
@@ -320,28 +305,12 @@ Template example:
 }
 ```
 
-`senderId` is optional. When omitted, the tenant's active default sender is used.
+`senderId` is optional. When omitted, the tenant active default sender is used.
 
-### List
-
-```http
-GET /api/v1/messages?direction=INBOUND&limit=50
-```
-
-Filters:
+List and read:
 
 ```text
-direction=INBOUND|OUTBOUND
-status=<MessageStatus>
-phone=<E.164 phone>
-senderId=<sender UUID>
-cursor=<message UUID>
-limit=1..100
-```
-
-### Get message and history
-
-```http
+GET /api/v1/messages
 GET /api/v1/messages/{messageId}
 ```
 
@@ -371,40 +340,15 @@ Processing path:
 verify signature -> persist raw event -> HTTP 200 -> process asynchronously
 ```
 
-Inbound processing:
-
-1. Resolve `metadata.phone_number_id` to a configured tenant sender.
-2. Deduplicate by Meta provider message ID.
-3. Create/update the contact.
-4. Open/extend the 24-hour service window.
-5. Persist the inbound message as `RECEIVED`.
-6. Process delivery status events.
-
-Unknown phone IDs fail closed instead of being assigned to an arbitrary tenant.
+The processor handles inbound messages, outbound delivery statuses, and message-template status updates before marking the durable webhook event processed.
 
 ## Reliability
 
-### Transactional outbox
-
-Message creation and queue intent are committed in the same PostgreSQL transaction.
-
-### RabbitMQ retry policy
-
-Default:
-
-```text
-5 seconds -> 30 seconds -> 2 minutes -> 10 minutes -> DLQ
-```
-
-Configure with:
-
-```text
-OUTBOUND_RETRY_DELAYS_MS=5000,30000,120000,600000
-```
-
-### Distributed rate limiting
-
-Workers share Redis counters keyed by Meta `phone_number_id`. Each sender may define `rateLimitPerSecond`; otherwise `DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND` is used.
+- Transactional outbox keeps message creation and queue intent atomic.
+- RabbitMQ delayed retries default to `5s -> 30s -> 2m -> 10m -> DLQ`.
+- Redis rate limits outbound traffic per Meta `phone_number_id`.
+- Webhook processing uses leases and exponential retry scheduling.
+- Template sync never applies a partial remote catalog.
 
 ## Production commands
 
@@ -443,7 +387,6 @@ Tenant sender tokens are referenced by configured `env:VARIABLE_NAME` values. Ne
 - audit coverage for additional administrative configuration actions
 - provider-backed secret stores beyond environment references
 - media messages and media storage
-- template synchronization and lifecycle management
 - priority queues for OTP / transactional / marketing traffic
 - campaign orchestration and segmentation
 - agent inbox / conversation assignment
