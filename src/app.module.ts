@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { ApiKeysModule } from "./api-keys/api-keys.module.js";
 import { AuditModule } from "./audit/audit.module.js";
 import { AuthModule } from "./auth/auth.module.js";
+import { CampaignsModule } from "./campaigns/campaigns.module.js";
 import { ContactsModule } from "./contacts/contacts.module.js";
 import { HealthModule } from "./health/health.module.js";
 import { MessagesModule } from "./messages/messages.module.js";
@@ -23,6 +24,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module.js";
     ContactsModule,
     PhoneNumbersModule,
     TemplatesModule,
+    CampaignsModule,
     QueueModule,
     OutboxModule,
     HealthModule,
