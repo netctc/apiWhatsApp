@@ -16,13 +16,6 @@ const MAX_COMPONENT_NODES = 1000;
 const MAX_PERSONALIZATION_TOKENS = 50;
 const MAX_DEPTH = 20;
 
-export function isCampaignPersonalizationEnabled(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  return (value as Record<string, unknown>).personalizationEnabled === true;
-}
-
 export function validateCampaignComponents(value: unknown): void {
   const state = { nodes: 0, tokens: 0 };
   visit(value, 0, state);
