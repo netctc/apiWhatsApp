@@ -1,6 +1,6 @@
 import { Type } from "class-transformer";
 import { IsEnum, IsInt, IsOptional, IsString, IsUUID, Max, Min } from "class-validator";
-import { MessageDirection, MessageStatus } from "../../generated/prisma/client.js";
+import { MessageDirection, MessageStatus, MessageTrafficClass } from "../../generated/prisma/client.js";
 
 export class ListMessagesQueryDto {
   @IsOptional()
@@ -10,6 +10,10 @@ export class ListMessagesQueryDto {
   @IsOptional()
   @IsEnum(MessageStatus)
   status?: MessageStatus;
+
+  @IsOptional()
+  @IsEnum(MessageTrafficClass)
+  trafficClass?: MessageTrafficClass;
 
   @IsOptional()
   @IsString()
