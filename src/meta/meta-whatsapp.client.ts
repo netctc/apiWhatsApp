@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { MetaApiError } from "./meta-api.error.js";
+import { metaGraphUrl } from "./meta-graph-url.util.js";
 import { mapMessageToMetaPayload } from "./meta-message.mapper.js";
 import type { MetaSenderContext } from "./meta-sender-resolver.service.js";
 
@@ -28,7 +29,10 @@ export class MetaWhatsAppClient {
     }
 
     const requestBody = mapMessageToMetaPayload(message);
-    const url = `https://graph.facebook.com/${graphVersion}/${sender.phoneNumberId}/messages`;
+    const url = metaGraphUrl(
+      this.config,
+      `${graphVersion}/${encodeURIComponent(sender.phoneNumberId)}/messages`,
+    );
 
     let response: Response;
     try {
@@ -37,7 +41,7 @@ export class MetaWhatsAppClient {
         headers: {
           Authorization: `Bearer ${sender.accessToken}`,
           "Content-Type": "application/json",
-          "User-Agent": "apiWhatsApp/0.3",
+          "User-Agent": "apiWhatsApp/0.14",
         },
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(timeoutMs),
