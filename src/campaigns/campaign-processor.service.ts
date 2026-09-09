@@ -111,13 +111,13 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
               r."status" = 'PENDING'
               AND r."nextAttemptAt" <= NOW()
               AND (r."processingLeaseUntil" IS NULL OR r."processingLeaseUntil" <= NOW())
+              AND c."status" = 'RUNNING'
             )
             OR (
               r."status" = 'PROCESSING'
               AND r."processingLeaseUntil" <= NOW()
             )
           )
-          AND c."status" = 'RUNNING'
         ORDER BY r."createdAt" ASC
         LIMIT ${batchSize}
         FOR UPDATE OF r SKIP LOCKED
@@ -151,6 +151,13 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
     }
 
     const campaign = recipient.campaign;
+    const idempotencyKey = this.recipientIdempotencyKey(campaign.id, recipient.contactId);
+    const existingMessageId = await this.findExistingMessageId(campaign.tenantId, idempotencyKey);
+    if (existingMessageId) {
+      await this.completeAsQueued(claim, existingMessageId);
+      return;
+    }
+
     if (campaign.status !== CampaignStatus.RUNNING) {
       await this.completeForCampaignState(claim, campaign.status, campaign.failureReason);
       return;
@@ -176,7 +183,7 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
         to: recipient.contact.phone,
         senderId: campaign.senderId,
         type: OutboundMessageType.TEMPLATE,
-        idempotencyKey: `campaign:${campaign.id}:contact:${recipient.contactId}`,
+        idempotencyKey,
         payload: {
           name: campaign.template.name,
           language: campaign.template.language,
@@ -184,12 +191,7 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
         },
       });
 
-      await this.completeClaim(claim, {
-        status: CampaignRecipientStatus.QUEUED,
-        messageId: message.id,
-        queuedAt: new Date(),
-        lastError: null,
-      });
+      await this.completeAsQueued(claim, message.id);
     } catch (error) {
       if (error instanceof ForbiddenException) {
         await this.completeClaim(claim, {
@@ -234,6 +236,30 @@ export class CampaignProcessorService implements OnApplicationBootstrap, OnModul
       return "Campaign template is no longer categorized as MARKETING";
     }
     return undefined;
+  }
+
+  private async findExistingMessageId(
+    tenantId: string,
+    idempotencyKey: string,
+  ): Promise<string | undefined> {
+    const message = await this.prisma.message.findFirst({
+      where: { tenantId, idempotencyKey },
+      select: { id: true },
+    });
+    return message?.id;
+  }
+
+  private recipientIdempotencyKey(campaignId: string, contactId: string): string {
+    return `campaign:${campaignId}:contact:${contactId}`;
+  }
+
+  private async completeAsQueued(claim: CampaignRecipient, messageId: string): Promise<void> {
+    await this.completeClaim(claim, {
+      status: CampaignRecipientStatus.QUEUED,
+      messageId,
+      queuedAt: new Date(),
+      lastError: null,
+    });
   }
 
   private async completeForCurrentCampaignState(
