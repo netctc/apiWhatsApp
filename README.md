@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.13.0
+## Current release: 0.14.0
 
 Engineering language is English for source code, API contracts, tests, operational documentation, logs, and commit messages.
 
@@ -12,30 +12,26 @@ Engineering language is English for source code, API contracts, tests, operation
 - PostgreSQL + Prisma persistence and versioned migrations
 - Tenant isolation with scoped API keys
 - API key lifecycle and append-only audit logs
-- Contacts, normalized tags, consent history, and 24-hour service windows
-- Reusable saved contact segments with bounded/indexable criteria
+- Contacts, consent history, normalized tags, and 24-hour service windows
+- Reusable tenant contact segments with bounded/indexable predicates
 - Multiple WhatsApp senders per tenant with runtime secret references
-- WABA template synchronization and lifecycle status tracking
-- Local `APPROVED` template enforcement before message creation
+- WABA template synchronization and lifecycle tracking
+- Local `APPROVED` template enforcement before outbound creation
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
-- Isolated RabbitMQ queues, retries, DLQs, and consumer prefetch by traffic class
+- Isolated RabbitMQ queues, retry queues, DLQs, and traffic-class prefetch
 - Priority-aware Redis sender capacity reservation
 - Transactional outbox
 - Signed Meta webhook ingestion and durable asynchronous processing
 - Inbound message persistence and delivery receipt processing
-- Marketing campaign orchestration with immutable audience snapshots
-- Direct and saved-segment campaign targeting
-- Safe opt-in per-recipient template personalization
-- Multi-replica campaign processing with leases and crash recovery
+- Durable marketing campaign orchestration with immutable audience snapshots
+- Safe per-recipient template personalization
 - Live campaign orchestration and WhatsApp delivery analytics
-- Public liveness and dependency readiness probes
-- Tenant-scoped operational status/backlog diagnostics
-- Prometheus-compatible process, HTTP, message, campaign, outbox, and webhook metrics
+- Process liveness, dependency readiness, and tenant operations diagnostics
+- Prometheus-compatible metrics and baseline alert rules
 - W3C trace/request correlation across HTTP -> outbox -> RabbitMQ -> worker
-- Baseline Prometheus alert rules
-- Reproducible dependency installation with committed npm lockfile
-- Production runtime high/critical vulnerability gate
-- Reproducible multi-stage Docker build
+- Committed npm lockfile, runtime vulnerability gate, and reproducible Docker build
+- Real CI integration test against PostgreSQL, Redis, RabbitMQ, API, worker, and HTTP Meta mock
+- Concurrent acceptance/drain load smoke gate
 - OpenAPI / Swagger
 
 ## Architecture
@@ -44,7 +40,6 @@ Engineering language is English for source code, API contracts, tests, operation
 flowchart LR
     Client[CRM / ERP / Application] --> API[REST API]
     API --> DB[(PostgreSQL)]
-    DB --> CampaignProcessor[Campaign Processor]
     DB --> Outbox[Transactional Outbox]
     Outbox --> Router[Traffic Router]
     Router --> OTP[(RabbitMQ OTP)]
@@ -53,18 +48,19 @@ flowchart LR
     OTP --> Worker[Outbound Worker]
     TX --> Worker
     MKT --> Worker
-    Worker --> Rate[Redis Sender Capacity]
+    Worker --> Rate[Redis Rate Limiter]
     Rate --> Meta[Meta Cloud API]
     Meta --> WhatsApp[WhatsApp]
     Meta --> Webhook[Signed Webhook]
     Webhook --> DB
     DB --> WebhookProcessor[Webhook Processor]
-    DB --> Analytics[Campaign Analytics]
-    DB --> Operations[Tenant Operations Snapshot]
-    DB --> Metrics[Prometheus Metrics]
+    DB --> CampaignProcessor[Campaign Processor]
+    DB --> Analytics[Analytics / Operations / Metrics]
 ```
 
-Outbound HTTP requests do not wait for WhatsApp delivery. Message creation and its outbox intent are committed atomically before RabbitMQ publication. Campaign sends reuse the normal `MessagesService` path and therefore cannot bypass tenant ownership, current consent, template approval, idempotency, priority routing, retries, or sender rate limits.
+Outbound HTTP requests accept and persist work quickly. Actual WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
+
+Campaigns reuse the normal message pipeline. They cannot bypass tenant ownership, current consent, template approval, idempotency, priority routing, retries, outbox durability, or sender rate limits.
 
 ## Requirements
 
@@ -91,9 +87,9 @@ npm run prisma:deploy
 npm run bootstrap:tenant -- --name="Acme" --slug=acme --key-name=bootstrap
 ```
 
-The bootstrap command prints the raw tenant API key once. PostgreSQL stores only its HMAC-SHA256 digest.
+The bootstrap command displays a raw API key once. PostgreSQL stores only its HMAC-SHA256 digest.
 
-Run the API and worker separately:
+Run API and worker separately:
 
 ```bash
 npm run start:dev
@@ -106,13 +102,13 @@ Swagger: `http://localhost:3000/docs`
 
 ## Authentication and authorization
 
-Business endpoints require:
+Business endpoints use:
 
 ```http
 X-API-Key: wapi_<prefix>_<secret>
 ```
 
-Tenant identity is derived only from the authenticated key and is never accepted from a client payload.
+Tenant identity comes only from the authenticated key and is never accepted from the request payload.
 
 Current scopes:
 
@@ -135,7 +131,7 @@ api_keys:write
 audit:read
 ```
 
-A delegated API key cannot grant scopes that the actor key does not already hold. Raw keys and key hashes are never returned by list or audit APIs.
+A delegated API key cannot create another key with privileges it does not itself hold.
 
 ## Messaging API
 
@@ -145,7 +141,7 @@ GET  /api/v1/messages
 GET  /api/v1/messages/{messageId}
 ```
 
-Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text requires an open 24-hour customer service window.
+Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text requires an open customer-service window.
 
 Outbound lifecycle:
 
@@ -155,21 +151,11 @@ QUEUED -> PROCESSING -> SUBMITTED -> SENT -> DELIVERED -> READ
                                -> FAILED
 ```
 
-## WhatsApp senders
+Clients can use `Idempotency-Key` to obtain one logical message across retries.
 
-Register sender metadata with a runtime credential reference:
+## Senders and templates
 
-```json
-{
-  "providerPhoneNumberId": "27681414235104944",
-  "wabaId": "8856996819413533",
-  "credentialRef": "env:META_ACME_WHATSAPP_TOKEN",
-  "rateLimitPerSecond": 75,
-  "isDefault": true
-}
-```
-
-Raw Meta sender access tokens are never stored in PostgreSQL.
+Sender endpoints:
 
 ```text
 POST  /api/v1/phone-numbers
@@ -178,7 +164,15 @@ GET   /api/v1/phone-numbers/{senderId}
 PATCH /api/v1/phone-numbers/{senderId}
 ```
 
-## Template lifecycle
+Sender credentials are stored as runtime references such as:
+
+```text
+env:META_ACME_WHATSAPP_TOKEN
+```
+
+Raw Meta sender tokens are not stored in PostgreSQL.
+
+Template endpoints:
 
 ```text
 POST /api/v1/templates/sync
@@ -186,20 +180,18 @@ GET  /api/v1/templates
 GET  /api/v1/templates/{templateId}
 ```
 
-Templates are synchronized at WABA level. Local deletion is applied only after the complete remote catalog has been read successfully. Malformed or incomplete provider pagination aborts synchronization.
+Templates are synchronized at WABA level. New template messages require an exact local `name + language + WABA` match with status `APPROVED`.
 
-Meta `message_template_status_update` webhooks update local lifecycle status. New template messages require an exact local `name + language + WABA` match with status `APPROVED`.
+## Priority routing
 
-## Traffic classes and priority routing
-
-Clients cannot choose message priority. The server derives it from trusted synchronized template metadata.
+Clients cannot choose priority. The server derives traffic class from trusted synchronized metadata.
 
 | Source | Traffic class |
 | --- | --- |
-| Approved `AUTHENTICATION` template | `OTP` |
-| Approved `MARKETING` template | `MARKETING` |
-| `UTILITY` or other approved template | `TRANSACTIONAL` |
-| Free-form service reply | `TRANSACTIONAL` |
+| `AUTHENTICATION` template | `OTP` |
+| `MARKETING` template | `MARKETING` |
+| `UTILITY` / other approved template | `TRANSACTIONAL` |
+| Free-form service message | `TRANSACTIONAL` |
 
 Default queues:
 
@@ -209,21 +201,21 @@ whatsapp.outbound.transactional
 whatsapp.outbound.marketing
 ```
 
-The traffic class is persisted on `Message`, copied into the outbox intent, and verified again by the worker before Meta is called.
+The persisted PostgreSQL traffic class is authoritative. Queue-class mismatches fail closed before Meta delivery.
 
-## Contacts, consent, segments, and campaigns
+## Contacts, consent, and segments
 
-Contacts support normalized lowercase tags and immutable consent history. Opt-out blocks new outbound messages. Inbound messages update the contact's last inbound timestamp and monotonically extend the customer service window.
+Contacts maintain current consent plus an immutable consent-event history. Opt-out blocks new outbound messages. Inbound messages update the customer-service window monotonically.
 
-Saved segments support bounded/indexable criteria only:
+Saved segments support bounded criteria only:
 
 ```text
-language   exact match
-tagsAny    contact has at least one tag
-tagsAll    contact has every tag
+language
+tagsAny
+tagsAll
 ```
 
-Segments never accept arbitrary SQL, JSON predicates, JavaScript, JSONPath, or an expression language.
+They do not accept SQL, JavaScript, JSONPath, or arbitrary expressions.
 
 ```text
 POST  /api/v1/segments
@@ -233,7 +225,9 @@ GET   /api/v1/segments/{segmentId}/count
 PATCH /api/v1/segments/{segmentId}
 ```
 
-Campaigns require an `APPROVED` `MARKETING` template on the selected sender WABA.
+Segment evaluation always adds tenant ownership and current `OPTED_IN` on the server.
+
+## Campaigns
 
 ```text
 POST /api/v1/campaigns
@@ -247,9 +241,13 @@ POST /api/v1/campaigns/{campaignId}/resume
 POST /api/v1/campaigns/{campaignId}/cancel
 ```
 
-A campaign chooses exactly one base audience: `allOptedIn=true`, a non-empty `contactIds` list, or an active saved `segmentId`.
+Campaigns require an approved `MARKETING` template. Audience mode must be exactly one of:
 
-Launch runs under a row lock and repeatable-read transaction, selects only currently opted-in contacts, and creates an immutable `CampaignRecipient` snapshot. Saved segment definitions are copied into the campaign draft so later segment edits cannot silently alter an existing campaign. Recipients use PostgreSQL leases and `FOR UPDATE SKIP LOCKED`; expired `PROCESSING` leases are reclaimable.
+- `allOptedIn=true`;
+- non-empty `contactIds`;
+- active saved `segmentId`.
+
+Launch runs under a row lock and repeatable-read transaction, selects currently opted-in contacts, and creates an immutable `CampaignRecipient` snapshot. Recipient processing uses leases and `FOR UPDATE SKIP LOCKED`, allowing multiple replicas and crash recovery.
 
 Each recipient has a deterministic logical message key:
 
@@ -257,11 +255,11 @@ Each recipient has a deterministic logical message key:
 campaign:<campaignId>:contact:<contactId>
 ```
 
-Personalization is disabled by default. When explicitly enabled, only allowlisted full-value tokens such as `{{contact.name}}` and `{{contact.metadata.plan}}` are resolved. No JavaScript, JSONPath, function calls, concatenation expressions, or arbitrary code are executed.
+Personalization is opt-in and resolves only allowlisted full-value contact tokens. No code or expression language is evaluated.
 
 ## Webhooks
 
-Configure Meta to use:
+Meta webhook endpoint:
 
 ```text
 GET/POST /api/v1/webhooks/meta/whatsapp
@@ -269,13 +267,15 @@ GET/POST /api/v1/webhooks/meta/whatsapp
 
 POST requests require a valid `X-Hub-Signature-256` generated with `META_APP_SECRET`.
 
+Processing path:
+
 ```text
 verify signature -> persist raw event -> HTTP 200 -> process asynchronously
 ```
 
-The durable processor handles inbound messages, outbound delivery receipts, and template lifecycle updates before marking an event processed.
+The durable processor handles inbound messages, delivery receipts, and template lifecycle updates.
 
-## Health and operational diagnostics
+## Health, metrics, and trace correlation
 
 Public probes:
 
@@ -285,52 +285,87 @@ GET /api/health/live
 GET /api/health/ready
 ```
 
-`/api/health` remains a backward-compatible liveness alias. Liveness does not call external dependencies. Readiness checks PostgreSQL, Redis, and RabbitMQ concurrently with a bounded timeout and returns HTTP `503` when any required dependency is unavailable.
+Readiness checks PostgreSQL, Redis, and RabbitMQ with bounded timeouts.
 
-Tenant diagnostics require `operations:read`:
+Tenant operational diagnostics:
 
 ```text
 GET /api/v1/operations/snapshot
 ```
 
-The snapshot exposes counters only: message status, traffic class, campaign status, recipient status, and tenant-owned transactional-outbox backlog. It does not return phone numbers, contact IDs, message bodies, provider payloads, or credentials.
-
-## Metrics, correlation, and alerting
-
-Release `0.13.0` adds Prometheus-compatible metrics and W3C trace/request correlation without adding a new observability SDK to the runtime dependency graph.
-
-Metrics endpoint:
+Prometheus metrics:
 
 ```text
 GET /api/metrics
 Authorization: Bearer <METRICS_BEARER_TOKEN>
 ```
 
-`METRICS_BEARER_TOKEN` must contain at least 32 characters. When it is missing or too short, the endpoint fails closed with HTTP `503`. This token is independent of tenant API keys and Meta credentials.
+Metrics labels are bounded and do not include tenant IDs, phones, message IDs, campaign IDs, payloads, raw dynamic paths, or user-provided strings.
 
-Exported telemetry includes:
+Valid W3C `traceparent` and bounded `x-request-id` values propagate through HTTP, transactional outbox, RabbitMQ retry/DLQ flow, and outbound worker correlation. Span export to an external tracing backend remains a future slice.
 
-- process uptime and memory;
-- HTTP request totals and duration histograms;
-- messages by current status;
-- campaigns and campaign recipients by status;
-- transactional outbox pending/due/leased/oldest age;
-- durable webhook pending/due/leased/oldest age.
+See `docs/observability.md` and `ops/prometheus-alerts.yml`.
 
-HTTP metric labels are intentionally limited to `method`, `controller`, `handler`, and `status_code`. Raw URLs, tenant IDs, phone numbers, message IDs, campaign IDs, error text, and user-provided strings are not used as Prometheus labels.
+## Integration and load-smoke gate
 
-Incoming valid W3C `traceparent` headers are continued with a new server span ID. Responses include the current `traceparent` and a bounded `x-request-id`. For newly-created outbound messages, the correlation carrier is persisted in the existing outbox JSON and propagated through RabbitMQ publish/retry/DLQ before a new worker span is created. Legacy messages without trace metadata continue to work.
+Release `0.14.0` adds a real-infrastructure CI gate.
 
-`0.13.0` provides trace correlation and W3C-compatible propagation; it does **not** yet export spans to an OpenTelemetry/Jaeger/Tempo/Datadog-style tracing backend.
+The integration job starts:
 
-Operational details:
+```text
+PostgreSQL 17
+Redis 7
+RabbitMQ 4
+```
 
-- `docs/observability.md` — scrape, correlation, cardinality, security, and dashboard runbook
-- `ops/prometheus-alerts.yml` — baseline alert rules for target down, stalled outbox, stalled webhooks, and elevated HTTP 5xx rate
+It then executes:
 
-## Supply-chain and build reproducibility
+```bash
+npm ci
+npm run prisma:generate
+npm run prisma:deploy
+npm run test:integration
+```
 
-The repository uses a committed npm lockfile and deterministic installation policy.
+The test process starts the real Nest API and outbound worker plus a local HTTP Meta-compatible mock. It proves:
+
+```text
+HTTP POST /messages
+  -> Message + OutboxEvent
+  -> RabbitMQ
+  -> worker
+  -> Redis rate limiter
+  -> Meta HTTP mock
+  -> provider ID persisted
+  -> SUBMITTED
+```
+
+It also proves idempotency and trace persistence, then sends a default 50-message concurrent burst and requires:
+
+- zero transport errors;
+- HTTP 202 for every accept;
+- unique internal IDs;
+- p95 acceptance below the conservative CI smoke threshold;
+- eventual `SUBMITTED` for every accepted message;
+- exact Meta mock delivery count.
+
+This CI burst is a regression test, not a production throughput certification. Dedicated capacity and soak tests are still required for production sizing.
+
+### Meta test seam
+
+The normal Graph host remains:
+
+```text
+https://graph.facebook.com
+```
+
+`META_GRAPH_API_BASE_URL` exists for controlled testing. HTTP overrides are accepted only under `NODE_ENV=test`; non-test environments require HTTPS. Embedded URL credentials, query strings, and fragments are rejected.
+
+See `docs/testing.md` for local execution, test boundaries, staged capacity profiles, and recommended failure-injection scenarios.
+
+## Supply-chain and Docker policy
+
+The repository commits `package-lock.json` and CI uses deterministic installs.
 
 Development/CI:
 
@@ -345,29 +380,20 @@ npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts
 npm run audit:prod
 ```
 
-CI fails when a high or critical advisory affects a package physically installed in the production runtime tree. The production Docker image is built from the same lockfile and Docker construction is a merge gate.
+CI blocks high/critical vulnerabilities present in the actual installed production runtime tree. Docker image construction is a required gate after build, runtime-security, and integration.
 
-## Production build
+## CI gates
 
-```bash
-npm ci
-npm run prisma:generate
-npm run build
-npm run prisma:deploy
-npm run start:prod
-```
+Every pull request must pass:
 
-Worker:
-
-```bash
-npm run start:worker
-```
-
-Container:
-
-```bash
-docker build -t api-whatsapp .
-```
+1. deterministic `npm ci`;
+2. Prisma generation;
+3. ESLint;
+4. TypeScript/Nest build;
+5. unit tests;
+6. production-runtime security validation;
+7. real PostgreSQL/Redis/RabbitMQ integration and load smoke;
+8. production Docker image build.
 
 ## Important environment variables
 
@@ -384,25 +410,17 @@ META_WEBHOOK_VERIFY_TOKEN
 META_HTTP_TIMEOUT_MS
 OUTBOUND_RETRY_DELAYS_MS
 DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND
-OUTBOUND_WORKER_PREFETCH_OTP
-OUTBOUND_WORKER_PREFETCH_TRANSACTIONAL
-OUTBOUND_WORKER_PREFETCH_MARKETING
-OUTBOUND_PRIORITY_RESERVATION_WINDOW_MS
-OUTBOUND_TRANSACTIONAL_MAX_SHARE
-OUTBOUND_MARKETING_MAX_SHARE
 CAMPAIGN_MAX_RECIPIENTS
-CAMPAIGN_PROCESSOR_INTERVAL_MS
-CAMPAIGN_PROCESSOR_BATCH_SIZE
-CAMPAIGN_PROCESSOR_LEASE_MS
-CAMPAIGN_RECIPIENT_MAX_ATTEMPTS
 ```
+
+See `.env.example` for the complete documented configuration set.
 
 Never commit production credentials or access tokens.
 
 ## Next implementation slices
 
+- production capacity / soak / failure-injection test expansion
 - OpenTelemetry span export and tracing-backend integration
-- integration and load tests
 - additional administrative audit coverage
 - provider-backed secret stores beyond environment references
 - media messages and media storage
@@ -410,4 +428,4 @@ Never commit production credentials or access tokens.
 
 ## Repository workflow
 
-Changes are developed through feature branches and pull requests. Pull requests must pass deterministic dependency installation, Prisma generation, lint, TypeScript/Nest build, unit tests, production-runtime security validation, and Docker image construction before merge.
+Changes are developed through feature branches and pull requests. `main` is kept behind the complete CI gate chain listed above.
