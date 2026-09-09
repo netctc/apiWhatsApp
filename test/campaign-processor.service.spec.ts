@@ -42,6 +42,11 @@ function loadedRecipient(
     contact: {
       id: CONTACT_ID,
       phone: "+96170123456",
+      name: "Jane Doe",
+      language: "en_US",
+      timezone: "Asia/Beirut",
+      tags: ["vip"],
+      metadata: { plan: "gold", points: 42 },
       consentStatus,
     },
     campaign: {
@@ -174,6 +179,75 @@ describe("CampaignProcessorService", () => {
         data: expect.objectContaining({
           status: CampaignRecipientStatus.QUEUED,
           messageId: MESSAGE_ID,
+        }),
+      }),
+    );
+  });
+
+  it("renders contact and metadata tokens before creating the message", async () => {
+    const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
+    recipient.campaign.components = [
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: "{{contact.name}}" },
+          { type: "text", text: "{{contact.metadata.plan}}" },
+          { type: "text", text: "{{contact.metadata.points}}" },
+        ],
+      },
+    ];
+    recipientFindUnique.mockResolvedValue(recipient);
+    messageCreate.mockResolvedValue({ id: MESSAGE_ID });
+    const internal = service as unknown as {
+      processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
+    };
+
+    await internal.processRecipient(claim());
+
+    expect(messageCreate).toHaveBeenCalledWith(
+      TENANT_ID,
+      expect.objectContaining({
+        payload: {
+          name: "promo_offer",
+          language: "en_US",
+          components: [
+            {
+              type: "body",
+              parameters: [
+                { type: "text", text: "Jane Doe" },
+                { type: "text", text: "gold" },
+                { type: "text", text: "42" },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+  });
+
+  it("skips only the recipient when a personalization value is missing", async () => {
+    const recipient = loadedRecipient(ConsentStatus.OPTED_IN);
+    recipient.contact.metadata = {};
+    recipient.campaign.components = [
+      {
+        type: "body",
+        parameters: [{ type: "text", text: "{{contact.metadata.plan}}" }],
+      },
+    ];
+    recipientFindUnique.mockResolvedValue(recipient);
+    const internal = service as unknown as {
+      processRecipient(recipient: ReturnType<typeof claim>): Promise<void>;
+    };
+
+    await internal.processRecipient(claim());
+
+    expect(messageCreate).not.toHaveBeenCalled();
+    expect(failCampaign).not.toHaveBeenCalled();
+    expect(recipientUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: CampaignRecipientStatus.SKIPPED,
+          lastError: "Missing personalization value for {{contact.metadata.plan}}",
         }),
       }),
     );
