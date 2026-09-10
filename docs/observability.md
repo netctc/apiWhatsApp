@@ -1,6 +1,6 @@
 # Observability runbook
 
-Release 0.13.0 introduced Prometheus-compatible metrics and W3C trace correlation without adding an observability SDK to the runtime dependency graph. Current hardening adds an optional bounded OTLP/HTTP JSON trace exporter while preserving the existing public `traceparent` and queue-carrier contract.
+Release 0.13.0 introduced Prometheus-compatible metrics and W3C trace correlation without adding an observability SDK to the runtime dependency graph. Current hardening adds optional bounded OTLP/HTTP JSON export, configurable local head sampling, and an explicit outbound span chain while preserving the public `traceparent` and queue-carrier contract.
 
 ## Scope
 
@@ -9,9 +9,12 @@ Implemented:
 - HTTP request correlation with W3C `traceparent`;
 - bounded `x-request-id` generation/propagation;
 - trace carrier persistence in the transactional outbox;
+- configurable local head sampling using six standard OpenTelemetry sampler names;
 - trace propagation through RabbitMQ publish, retry, and dead-letter payloads;
-- trace restoration with a new worker span before outbound dispatch;
-- optional OTLP/HTTP JSON export for completed HTTP server spans and outbound worker consumer spans;
+- explicit RabbitMQ producer spans from transactional outbox publication;
+- trace restoration with a new worker consumer span before outbound dispatch;
+- explicit Meta WhatsApp client spans around outbound message submission;
+- optional OTLP/HTTP JSON export for completed HTTP server, RabbitMQ producer/consumer, and Meta client spans;
 - bounded in-process OTLP queue, batch size, schedule delay, and request timeout;
 - W3C sampled-flag enforcement before export;
 - Prometheus text metrics;
@@ -22,12 +25,12 @@ Not implemented in this slice:
 
 - automatic OpenTelemetry SDK instrumentation of PostgreSQL, Redis, RabbitMQ, `fetch`, or other libraries;
 - OTLP metrics or logs export;
-- producer/client child spans around outbox publication, RabbitMQ publish, Redis, or Meta HTTP calls;
-- a local probabilistic/root sampling policy beyond the existing W3C trace flags;
+- child spans for PostgreSQL, Redis, media storage, campaign/webhook internals, or every Meta API operation;
+- remote/vendor-specific samplers such as Jaeger remote or AWS X-Ray;
 - tracing-backend deployment or vendor-specific configuration for Jaeger, Tempo, Honeycomb, Datadog, etc.;
 - automated alert delivery configuration for Alertmanager/PagerDuty/Slack/etc.
 
-The exporter is deliberately non-critical telemetry. Collector unavailability, rejection, timeout, queue saturation, or invalid exporter configuration cannot make a business API request or outbound message fail.
+Telemetry remains deliberately non-critical. Collector unavailability, rejection, timeout, queue saturation, invalid exporter configuration, or invalid sampler configuration cannot make a business API request or outbound message fail.
 
 ## Trace correlation
 
@@ -55,19 +58,20 @@ Invalid/all-zero W3C trace IDs or span IDs are rejected as correlation inputs an
 
 ### Outbound asynchronous path
 
-For newly-created outbound messages, the current trace carrier is stored in the existing outbox JSON payload. No database migration is required.
+For newly-created outbound messages, the current HTTP trace carrier is stored in the existing outbox JSON payload. No database migration is required.
+
+The traced outbound hierarchy is:
 
 ```text
-HTTP request
+HTTP SERVER
   -> Message + OutboxEvent transaction
-  -> outbox publisher
-  -> RabbitMQ traffic-class queue
-  -> retry queue(s), if required
-  -> outbound worker
-  -> Meta Cloud API
+  -> RabbitMQ PRODUCER (outbox publisher)
+       -> RabbitMQ traffic-class queue / retry queue(s)
+       -> RabbitMQ CONSUMER (outbound worker attempt)
+            -> Meta WhatsApp CLIENT (send_message)
 ```
 
-The carrier contains only:
+The outbox stores a compact carrier containing only:
 
 ```json
 {
@@ -78,7 +82,11 @@ The carrier contains only:
 }
 ```
 
-It does not contain tenant IDs, contact IDs, phone numbers, campaign IDs, message bodies, provider payloads, or credentials.
+When the outbox publishes to RabbitMQ, it creates a new producer span and passes that producer span ID as the queue carrier parent. The worker then creates its consumer span as a child of the producer. The Meta client span is created as a child of the active worker consumer span.
+
+No tracing header is injected into the Meta Cloud API request. The client span represents the local external-call boundary only; it does not claim that Meta participates in this distributed trace.
+
+Trace carriers do not contain tenant IDs, contact IDs, phone numbers, campaign IDs, message bodies, provider payloads, or credentials.
 
 Legacy outbox and RabbitMQ jobs without trace metadata continue to process normally. Invalid optional trace metadata is ignored rather than allowed to block message delivery.
 
@@ -157,19 +165,59 @@ A full local queue drops new spans rather than applying backpressure to API/work
 
 During graceful module shutdown the periodic timer stops and the exporter attempts to flush the remaining bounded queue. Collector failures during that flush remain non-fatal.
 
-### Sampling behavior
+## Sampling behavior
 
-The exporter sends a span only when the W3C sampled bit is set in `traceFlags`.
+The trace context applies a local head-sampling decision when a server/worker span context is created. The OTLP exporter then sends a span only when the resulting W3C sampled bit is set in `traceFlags`.
 
-A valid inbound parent with `traceFlags=00` therefore continues correlation but does not export the server/worker spans from this exporter. A parent with `01` is export-eligible.
+Default:
 
-When no valid parent exists, the current trace-context implementation creates a local root with `traceFlags=01`. This means enabling OTLP export without upstream sampling can export every instrumented local-root request. For high-volume deployments, use an upstream W3C sampling policy or size the collector accordingly. A configurable local probability sampler is a separate future hardening slice.
+```text
+OTEL_TRACES_SAMPLER=parentbased_always_on
+```
+
+Supported local sampler names:
+
+```text
+always_on
+always_off
+traceidratio
+parentbased_always_on
+parentbased_always_off
+parentbased_traceidratio
+```
+
+The default preserves previous behavior: local roots are sampled and valid upstream parent decisions are respected.
+
+Ratio-based samplers use:
+
+```text
+OTEL_TRACES_SAMPLER_ARG=<0..1>
+```
+
+Examples:
+
+```text
+# Sample approximately 10% of local roots, but preserve valid parent decisions.
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.10
+
+# Never export locally-created traces, while an upstream sampled parent can still be preserved.
+OTEL_TRACES_SAMPLER=parentbased_always_off
+```
+
+`parentbased_*` modes preserve the sampled/unsampled bit from a valid parent and apply their root policy only when there is no valid parent. Non-parent `always_*` and `traceidratio` modes apply their local policy even when a valid parent exists.
+
+The ratio decision is deterministic and nested for the same trace ID: raising the configured ratio can only add locally-selected trace IDs rather than randomly reshuffling every decision. This implementation does not claim bit-for-bit sampler interoperability with every historical OpenTelemetry SDK implementation; use W3C parent-based propagation when cross-service sampling consistency is required.
+
+Invalid/unsupported sampler names fall back to `parentbased_always_on` and log a bounded configuration error. An invalid ratio argument falls back to `1.0`. Neither condition makes application readiness fail.
+
+Remote/vendor-specific sampler names are not implemented by this dependency-free tracing layer.
 
 ## Exported span inventory
 
 ### HTTP server
 
-Each completed Nest HTTP request can emit one `SERVER` span using the exact trace/span identity already returned through the response `traceparent`.
+Each completed Nest HTTP request can emit one `SERVER` span using the exact trace/span identity returned through the response `traceparent`.
 
 Span name:
 
@@ -189,6 +237,27 @@ code.function
 HTTP 5xx/unhandled failures set OTLP span status to `ERROR`. 4xx responses remain application/client outcomes rather than server-span errors.
 
 Raw URL/path/query values are deliberately not exported, avoiding IDs, phone numbers, tenant slugs, search terms, or other dynamic path/query data.
+
+### RabbitMQ producer
+
+When a traced transactional outbox event is published, the outbox publisher emits one `PRODUCER` span:
+
+```text
+rabbitmq publish whatsapp.outbound
+```
+
+Bounded attributes:
+
+```text
+messaging.system=rabbitmq
+messaging.operation.type=publish
+app.message.traffic_class=<OTP|TRANSACTIONAL|MARKETING>
+app.outbox.result=<success|error>
+```
+
+On success, the producer span becomes the parent carried with the RabbitMQ message. On publish failure, the span is marked `ERROR` and normal outbox retry behavior remains authoritative.
+
+No outbox event ID, message ID, exact queue name, retry reason, or broker error text is exported.
 
 ### Outbound worker consumer
 
@@ -213,7 +282,30 @@ app.queue.result=<ack|retry|defer|dead|exhausted|exception>
 
 `retry`, `dead`, `exhausted`, and thrown exceptions are exported with OTLP `ERROR` status. Dynamic exception/retry reason text is intentionally excluded.
 
-The worker span continues the existing queue carrier trace ID and uses a new span ID. No message ID is exported as a span attribute.
+The consumer span continues the producer carrier trace ID and uses a new span ID. No message ID is exported as a span attribute.
+
+### Meta outbound client
+
+A claimed outbound message creates one `CLIENT` child span around `MetaWhatsAppClient.sendMessage`:
+
+```text
+meta.whatsapp send_message
+```
+
+Bounded attributes:
+
+```text
+http.request.method=POST
+app.provider=meta_whatsapp
+app.operation=send_message
+app.message.traffic_class=<OTP|TRANSACTIONAL|MARKETING>
+app.meta.result=<success|retryable_error|permanent_error|exception>
+http.response.status_code=<numeric status when Meta returned one>
+```
+
+Meta/retry/transport failures set the client span status to `ERROR`, while the existing dispatcher remains authoritative for retry/dead-letter behavior.
+
+The span deliberately excludes phone-number IDs, recipient numbers, message/provider IDs, request/response payloads, Graph URLs, access tokens, and dynamic Meta error text. `traceparent` is not sent to Meta.
 
 ## OTLP data-handling policy
 
@@ -412,7 +504,7 @@ At minimum graph:
 7. campaign recipient counts by orchestration status;
 8. process RSS and heap usage;
 9. OTLP collector accepted/dropped spans from collector-side metrics;
-10. trace latency/error views for HTTP and outbound worker spans.
+10. trace latency/error waterfalls across HTTP server -> RabbitMQ producer -> worker consumer -> Meta client spans.
 
 ## Health versus telemetry
 
@@ -423,7 +515,7 @@ GET /api/health/live
 GET /api/health/ready
 ```
 
-Use `/api/metrics` for monitoring/scraping and OTLP for trace export. Collector availability is deliberately **not** part of application readiness because telemetry must not remove a healthy messaging replica from service.
+Use `/api/metrics` for monitoring/scraping and OTLP for trace export. Collector availability and sampler configuration are deliberately **not** part of application readiness because telemetry must not remove a healthy messaging replica from service.
 
 Do not use Prometheus scrape or OTLP collector success as Kubernetes liveness/readiness checks.
 
@@ -435,6 +527,7 @@ Do not use Prometheus scrape or OTLP collector success as Kubernetes liveness/re
 - rotate monitoring/collector credentials independently of tenant credentials;
 - do not log metrics or collector bearer tokens;
 - keep OTLP disabled when trace export is not required;
+- choose `parentbased_traceidratio` for bounded high-volume root sampling when upstream parent decisions must be preserved;
 - review every new metric label and span attribute for cardinality and data leakage;
 - never export business payloads or tenant/contact/message identifiers as routine telemetry;
-- size collector ingestion and upstream sampling before enabling trace export on high-volume production traffic.
+- size collector ingestion and sampling policy before enabling trace export on high-volume production traffic.
