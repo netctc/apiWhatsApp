@@ -31,7 +31,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - Live campaign orchestration and WhatsApp delivery analytics
 - Process liveness, dependency readiness, and tenant operations diagnostics
 - Prometheus-compatible metrics and baseline alert rules
-- W3C trace/request correlation across HTTP -> outbox -> RabbitMQ -> worker, with optional bounded OTLP/HTTP JSON export for HTTP server and outbound worker spans
+- W3C trace/request correlation with configurable local head sampling and optional bounded OTLP/HTTP JSON export across HTTP server -> RabbitMQ producer -> worker consumer -> Meta outbound client spans
 - Committed npm lockfile, runtime vulnerability gate, and reproducible Docker build
 - Real CI integration test against PostgreSQL, Redis, RabbitMQ, API, worker, and controlled external-service seams
 - Concurrent acceptance/drain load smoke gate
@@ -445,7 +445,7 @@ Authorization: Bearer <METRICS_BEARER_TOKEN>
 
 Metrics labels are bounded and do not include tenant IDs, phones, message IDs, campaign IDs, payloads, raw dynamic paths, or user-provided strings.
 
-Valid W3C `traceparent` and bounded `x-request-id` values propagate through HTTP, transactional outbox, RabbitMQ retry/DLQ flow, and outbound worker correlation. Optional OTLP/HTTP JSON export emits completed HTTP server spans and outbound worker consumer spans while preserving the same trace IDs. Collector failure is telemetry-only and does not affect application readiness or message processing.
+Valid W3C `traceparent` and bounded `x-request-id` values propagate through HTTP, transactional outbox, RabbitMQ retry/DLQ flow, and outbound worker correlation. Optional OTLP/HTTP JSON export now emits the outbound hierarchy `HTTP SERVER -> RabbitMQ PRODUCER -> worker CONSUMER -> Meta CLIENT`. Collector failure is telemetry-only and does not affect application readiness or message processing; tracing headers are not forwarded to Meta.
 
 Enable trace export with an exact trace endpoint:
 
@@ -454,7 +454,22 @@ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otel-collector.example.net/v1/traces
 OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json
 ```
 
-or configure `OTEL_EXPORTER_OTLP_ENDPOINT` and the exporter appends `/v1/traces`. Batch/queue/timeout controls are bounded and documented in `.env.example`. Exported attributes deliberately exclude tenant IDs, phones, message IDs, request IDs, raw URLs, payloads, storage keys and dynamic error text.
+or configure `OTEL_EXPORTER_OTLP_ENDPOINT` and the exporter appends `/v1/traces`. Batch/queue/timeout controls are bounded and documented in `.env.example`.
+
+Local head sampling defaults to the previous behavior:
+
+```text
+OTEL_TRACES_SAMPLER=parentbased_always_on
+```
+
+For high-volume root sampling while preserving valid upstream decisions:
+
+```text
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=0.10
+```
+
+Supported local sampler names are documented in `.env.example` and `docs/observability.md`. Exported attributes deliberately exclude tenant IDs, phones, message IDs, request IDs, raw URLs, payloads, storage keys and dynamic error text.
 
 See `docs/observability.md` and `ops/prometheus-alerts.yml`.
 
@@ -469,11 +484,12 @@ text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mo
 multipart media -> temp -> signature/scan -> MediaAsset planned key -> retained filesystem or S3 bytes -> Meta mock /media -> mediaId
 expired retained MediaAsset -> backend binary delete -> registry delete -> detail 404
 traceparent -> completed Nest HTTP server span -> OTLP/HTTP JSON collector mock
+traced message -> HTTP SERVER -> RabbitMQ PRODUCER -> worker CONSUMER -> Meta CLIENT -> controlled OTLP collector
 ```
 
 S3 coverage additionally requires the signed object PUT to complete before Meta upload, validates exact bytes/hash/content length, checks storage readiness and tenant retained-byte operations evidence, and then proves signed object deletion before expired registry metadata is removed.
 
-OTLP coverage additionally requires exact trace continuation: the exported HTTP span uses the trace ID supplied by a valid W3C parent, the new span ID returned in the response `traceparent`, and the incoming parent span ID. Unit coverage validates outbound worker consumer spans, sampled-flag suppression, header precedence and fail-open collector behavior.
+OTLP coverage requires exact trace continuation and a safe data boundary. The distributed outbound integration verifies the producer span becomes the queue parent, the worker consumer continues from it, the Meta client span is a child of the consumer, and no tracing header is injected into the Meta mock. Unit coverage validates sampled-flag policy, deterministic ratio decisions, failure spans and absence of message/phone/payload data from explicit span attributes.
 
 Inbox coverage proves:
 
@@ -546,6 +562,8 @@ OTEL_EXPORTER_OTLP_HEADERS
 OTEL_EXPORTER_OTLP_TRACES_HEADERS
 OTEL_EXPORTER_OTLP_TIMEOUT
 OTEL_EXPORTER_OTLP_TRACES_TIMEOUT
+OTEL_TRACES_SAMPLER
+OTEL_TRACES_SAMPLER_ARG
 OTEL_BSP_MAX_QUEUE_SIZE
 OTEL_BSP_MAX_EXPORT_BATCH_SIZE
 OTEL_BSP_SCHEDULE_DELAY
@@ -587,7 +605,7 @@ Never commit production credentials or access tokens.
 ## Next implementation slices
 
 - production capacity / soak / new incident-driven failure-injection test expansion
-- OpenTelemetry client/producer auto-instrumentation, configurable local sampling and tracing-backend deployment guidance
+- broader OpenTelemetry instrumentation for datastore/internal-client spans and tracing-backend deployment guidance
 - provider-backed secret stores beyond environment references
 - asynchronous media quarantine/reconciliation, deeper content validation, and advanced object lifecycle/legal-hold policies
 - realtime inbox delivery (SSE/WebSocket), teams/skills, routing policies, SLA/escalation and human-agent session/SSO integration
