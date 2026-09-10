@@ -8,6 +8,7 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from "@nestjs/common";
+import { MediaBinaryStorageError } from "../src/media/media-binary-storage.service.js";
 import { MediaMalwareScanError } from "../src/media/media-malware-scanner.service.js";
 import { MediaService } from "../src/media/media.service.js";
 import { MetaApiError } from "../src/meta/meta-api.error.js";
@@ -33,6 +34,8 @@ describe("MediaService", () => {
   const resolveForTenant = jest.fn();
   const uploadMedia = jest.fn();
   const scan = jest.fn();
+  const stage = jest.fn();
+  const discard = jest.fn();
   const mediaAssetCreate = jest.fn();
   const mediaAssetUpdate = jest.fn();
   const mediaAssetFindMany = jest.fn();
@@ -48,6 +51,9 @@ describe("MediaService", () => {
     size: 4,
     scanMode: "DISABLED",
     scanStatus: "NOT_SCANNED",
+    storageMode: "DISABLED",
+    storageKey: null,
+    storedAt: null,
     providerUploadedAt: null,
     expiresAt: new Date("2026-10-10T12:00:00.000Z"),
     failedAt: null,
@@ -60,6 +66,7 @@ describe("MediaService", () => {
     { resolveForTenant } as never,
     { uploadMedia } as never,
     { scan } as never,
+    { stage, discard } as never,
     {
       mediaAsset: {
         create: mediaAssetCreate,
@@ -81,9 +88,17 @@ describe("MediaService", () => {
     });
     uploadMedia.mockResolvedValue({ mediaId: "media-123" });
     scan.mockResolvedValue(undefined);
+    stage.mockImplementation(async (filePath: string) => ({
+      mode: "DISABLED",
+      key: null,
+      filePath,
+      storedAt: null,
+    }));
+    discard.mockResolvedValue(undefined);
     mediaAssetCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       ...pendingAsset,
       ...data,
+      id: ASSET_ID,
     }));
     mediaAssetUpdate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       ...pendingAsset,
@@ -94,7 +109,7 @@ describe("MediaService", () => {
     mediaAssetFindFirst.mockResolvedValue(null);
   });
 
-  it("scans, reserves expiring registry metadata before Meta, finalizes it after upload, and removes the temporary file", async () => {
+  it("stages, scans, reserves expiring registry metadata before Meta, finalizes it, and removes the multipart temp file", async () => {
     const temp = await createTempFile();
     const startedAt = Date.now();
     try {
@@ -104,11 +119,14 @@ describe("MediaService", () => {
         size: temp.size,
       });
 
+      expect(stage).toHaveBeenCalledWith(temp.filePath, TENANT_ID, expect.any(String));
       expect(scan).toHaveBeenCalledWith(temp.filePath);
+      expect(stage.mock.invocationCallOrder[0]).toBeLessThan(scan.mock.invocationCallOrder[0]);
       expect(scan.mock.invocationCallOrder[0]).toBeLessThan(resolveForTenant.mock.invocationCallOrder[0]);
       expect(resolveForTenant).toHaveBeenCalledWith(TENANT_ID, SENDER_ID);
       expect(mediaAssetCreate).toHaveBeenCalledWith({
         data: {
+          id: expect.any(String),
           tenantId: TENANT_ID,
           senderId: SENDER_ID,
           category: "IMAGE",
@@ -116,6 +134,9 @@ describe("MediaService", () => {
           size: temp.size,
           scanMode: "DISABLED",
           scanStatus: "NOT_SCANNED",
+          storageMode: "DISABLED",
+          storageKey: null,
+          storedAt: null,
           expiresAt: expect.any(Date),
         },
       });
@@ -137,9 +158,6 @@ describe("MediaService", () => {
           failureCode: null,
         }),
       });
-      expect(mediaAssetUpdate.mock.calls[0]?.[0]).not.toEqual(
-        expect.objectContaining({ data: expect.objectContaining({ expiresAt: expect.anything() }) }),
-      );
       expect(result).toEqual({
         mediaId: "media-123",
         senderId: SENDER_ID,
@@ -147,12 +165,50 @@ describe("MediaService", () => {
         mimeType: "image/jpeg",
         size: temp.size,
       });
+      expect(discard).not.toHaveBeenCalled();
 
       const reservation = mediaAssetCreate.mock.calls[0]?.[0] as {
         data: { expiresAt: Date };
       };
       expect(reservation.data.expiresAt.getTime()).toBeGreaterThanOrEqual(startedAt + 30 * DAY_MS);
       expect(reservation.data.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 30 * DAY_MS);
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("scans and uploads the staged filesystem copy while persisting only its internal key", async () => {
+    const temp = await createTempFile();
+    const stagedPath = "/var/lib/api-whatsapp/media/tenant/asset";
+    const storedAt = new Date();
+    stage.mockResolvedValue({
+      mode: "FILESYSTEM",
+      key: `${TENANT_ID}/${ASSET_ID}`,
+      filePath: stagedPath,
+      storedAt,
+    });
+
+    try {
+      await service.upload(TENANT_ID, {}, {
+        path: temp.filePath,
+        mimetype: "image/jpeg",
+        size: temp.size,
+      });
+
+      expect(scan).toHaveBeenCalledWith(stagedPath);
+      expect(uploadMedia).toHaveBeenCalledWith(
+        expect.objectContaining({ filePath: stagedPath }),
+        expect.objectContaining({ internalSenderId: SENDER_ID }),
+      );
+      expect(mediaAssetCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          storageMode: "FILESYSTEM",
+          storageKey: `${TENANT_ID}/${ASSET_ID}`,
+          storedAt,
+        }),
+      });
+      expect(discard).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
@@ -189,7 +245,30 @@ describe("MediaService", () => {
     }
   });
 
-  it("fails before provider access when registry TTL configuration is invalid", async () => {
+  it("fails closed before scanning and provider access when binary staging is unavailable", async () => {
+    stage.mockRejectedValue(new MediaBinaryStorageError("volume unavailable"));
+    const temp = await createTempFile();
+
+    try {
+      await expect(
+        service.upload(TENANT_ID, {}, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      expect(scan).not.toHaveBeenCalled();
+      expect(resolveForTenant).not.toHaveBeenCalled();
+      expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(uploadMedia).not.toHaveBeenCalled();
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails before provider access when registry TTL configuration is invalid and discards any pre-registry stage", async () => {
     process.env.MEDIA_ASSET_TTL_DAYS = "0";
     const temp = await createTempFile();
 
@@ -202,16 +281,18 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
+      expect(scan).toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
+      expect(discard).toHaveBeenCalledWith("DISABLED", null);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
   });
 
-  it("rejects a supported declared MIME when file content has a different signature", async () => {
+  it("rejects a supported declared MIME before staging when file content has a different signature", async () => {
     const temp = await createTempFile(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
@@ -228,6 +309,7 @@ describe("MediaService", () => {
         }),
       });
 
+      expect(stage).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
@@ -238,7 +320,14 @@ describe("MediaService", () => {
     }
   });
 
-  it("rejects malware before sender/provider/registry access and removes the temporary file", async () => {
+  it("rejects malware before sender/provider/registry access and discards a staged filesystem copy", async () => {
+    const stagedPath = "/var/lib/api-whatsapp/media/tenant/asset";
+    stage.mockResolvedValue({
+      mode: "FILESYSTEM",
+      key: `${TENANT_ID}/${ASSET_ID}`,
+      filePath: stagedPath,
+      storedAt: new Date(),
+    });
     scan.mockRejectedValue(
       new MediaMalwareScanError("MALWARE_DETECTED", "Eicar-Test-Signature FOUND"),
     );
@@ -253,10 +342,11 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(UnprocessableEntityException);
 
-      expect(scan).toHaveBeenCalledWith(temp.filePath);
+      expect(scan).toHaveBeenCalledWith(stagedPath);
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
+      expect(discard).toHaveBeenCalledWith("FILESYSTEM", `${TENANT_ID}/${ASSET_ID}`);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
@@ -281,13 +371,21 @@ describe("MediaService", () => {
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
+      expect(discard).toHaveBeenCalledWith("DISABLED", null);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
   });
 
-  it("records a failed registry lifecycle with the same retention deadline when Meta is temporarily unavailable", async () => {
+  it("retains a reserved filesystem binary through a retryable Meta failure until TTL cleanup", async () => {
+    const stagedPath = "/var/lib/api-whatsapp/media/tenant/asset";
+    stage.mockResolvedValue({
+      mode: "FILESYSTEM",
+      key: `${TENANT_ID}/${ASSET_ID}`,
+      filePath: stagedPath,
+      storedAt: new Date(),
+    });
     uploadMedia.mockRejectedValue(
       new MetaApiError("provider timeout", {
         retryable: true,
@@ -305,7 +403,11 @@ describe("MediaService", () => {
       ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
       expect(mediaAssetCreate).toHaveBeenCalledWith({
-        data: expect.objectContaining({ expiresAt: expect.any(Date) }),
+        data: expect.objectContaining({
+          storageMode: "FILESYSTEM",
+          storageKey: `${TENANT_ID}/${ASSET_ID}`,
+          expiresAt: expect.any(Date),
+        }),
       });
       expect(mediaAssetUpdate).toHaveBeenCalledWith({
         where: { id: ASSET_ID },
@@ -314,17 +416,21 @@ describe("MediaService", () => {
           failureCode: "META_API_ERROR",
         },
       });
+      expect(discard).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
   });
 
-  it("lists only the authenticated tenant registry and derives expired state", async () => {
+  it("lists only the authenticated tenant registry and exposes safe storage evidence without storage keys", async () => {
     mediaAssetFindMany.mockResolvedValue([
       {
         ...pendingAsset,
         providerMediaId: "media-expired",
+        storageMode: "FILESYSTEM",
+        storageKey: `${TENANT_ID}/${ASSET_ID}`,
+        storedAt: new Date(Date.now() - 4 * DAY_MS),
         providerUploadedAt: new Date(Date.now() - 3 * DAY_MS),
         expiresAt: new Date(Date.now() - DAY_MS),
       },
@@ -340,15 +446,23 @@ describe("MediaService", () => {
     expect(result[0]).toEqual(expect.objectContaining({
       assetId: ASSET_ID,
       mediaId: "media-expired",
+      storageMode: "FILESYSTEM",
+      binaryRetained: true,
       state: "EXPIRED",
     }));
+    expect(result[0]).not.toHaveProperty("storageKey");
   });
 
   it("returns one tenant asset and hides cross-tenant existence", async () => {
     mediaAssetFindFirst.mockResolvedValueOnce(pendingAsset).mockResolvedValueOnce(null);
 
     await expect(service.findById(TENANT_ID, ASSET_ID)).resolves.toEqual(
-      expect.objectContaining({ assetId: ASSET_ID, state: "UPLOADING" }),
+      expect.objectContaining({
+        assetId: ASSET_ID,
+        storageMode: "DISABLED",
+        binaryRetained: false,
+        state: "UPLOADING",
+      }),
     );
     expect(mediaAssetFindFirst).toHaveBeenNthCalledWith(1, {
       where: { id: ASSET_ID, tenantId: TENANT_ID },
@@ -357,7 +471,7 @@ describe("MediaService", () => {
     await expect(service.findById(OTHER_TENANT_ID, ASSET_ID)).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it("removes rejected files before any scanner/sender/provider call", async () => {
+  it("removes rejected files before any storage/scanner/sender/provider call", async () => {
     const temp = await createTempFile(Buffer.from("zip"));
     try {
       await expect(
@@ -368,6 +482,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(stage).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
@@ -389,6 +504,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(stage).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
@@ -409,6 +525,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(stage).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
