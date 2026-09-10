@@ -7,6 +7,7 @@ import {
 } from "@nestjs/common";
 import { normalizePhoneNumber } from "../contacts/phone.util.js";
 import { MessageDirection, MessageStatus, MessageType, Prisma } from "../generated/prisma/client.js";
+import { ConversationActivityService } from "../inbox/conversation-activity.service.js";
 import { TraceContextService } from "../observability/trace-context.service.js";
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
@@ -30,6 +31,7 @@ export class MessagesService {
     private readonly outboundPolicy: OutboundPolicyService,
     private readonly phoneNumbers: PhoneNumbersService,
     private readonly templates: TemplatesService,
+    @Optional() private readonly conversationActivity?: ConversationActivityService,
     @Optional() private readonly trace?: TraceContextService,
   ) {}
 
@@ -72,13 +74,23 @@ export class MessagesService {
 
     const trafficClass = deriveTrafficClass(messageType, templateCategory);
     const trace = this.trace?.carrier();
+    const acceptedAt = new Date();
 
     try {
       return await this.prisma.$transaction(async (transaction) => {
+        const conversationId = await this.conversationActivity?.recordOutbound(transaction, {
+          tenantId,
+          senderId: sender.id,
+          phone: normalizedTo,
+          messageType,
+          occurredAt: acceptedAt,
+        });
+
         const message = await transaction.message.create({
           data: {
             tenantId,
             senderId: sender.id,
+            ...(conversationId ? { conversationId } : {}),
             direction: MessageDirection.OUTBOUND,
             trafficClass,
             type: messageType,
