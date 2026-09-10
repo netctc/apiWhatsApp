@@ -34,6 +34,7 @@ authenticate + authorize
   -> Multer disk-backed temporary file
   -> validate allowed multipart fields
   -> validate declared MIME + size policy
+  -> inspect bounded file signature/container prefix
   -> resolve sender inside authenticated tenant
   -> resolve sender credential reference
   -> POST /{phone-number-id}/media to Meta
@@ -93,14 +94,17 @@ The resulting `mediaId` can be passed to the existing message endpoint, for exam
 - Raw Meta access tokens are never returned and are still resolved from configured credential references.
 - Raw Meta provider response bodies are not returned on upload failure.
 - Unexpected multipart fields fail closed.
-- Temporary files are deleted in `finally` after success, policy rejection, sender/provider failure, or other service-level errors.
+- The declared MIME type is cross-checked against a bounded server-side content signature/container inspection before sender credentials are resolved or Meta is called.
+- Temporary files are deleted in `finally` after success, MIME/signature rejection, sender/provider failure, or other service-level errors.
 - Provider logs contain only safe technical sender/status/code/retryability data and never the token, file bytes, original filename, or provider response body.
 
 ## Temporary storage
 
 Uploads are written to the operating system temporary directory using generated filenames rather than buffered in Node.js memory. This prevents a permitted large document upload from consuming an equivalent application heap buffer.
 
-Operators must ensure the runtime has sufficient ephemeral disk capacity and normal OS/container isolation for the temporary directory. The file exists only for the duration of the synchronous provider upload path.
+Operators must ensure the runtime has sufficient ephemeral disk capacity and normal OS/container isolation for the temporary directory. The file exists only for the duration of the synchronous validation/provider upload path.
+
+The signature check reads at most the first 8 KiB of the temporary file and therefore does not introduce a second full-file memory copy.
 
 ## Timeouts and failure mapping
 
@@ -114,11 +118,26 @@ Accepted configuration range is 1,000 to 600,000 milliseconds.
 
 Retryable Meta/network failures return HTTP 503 with a generic message. Permanent Meta rejection returns HTTP 502 with a generic message. Provider payload details are deliberately not exposed to API consumers.
 
+A supported declared MIME type whose file prefix does not match the expected signature/container is rejected locally with HTTP 400 before provider access.
+
 ## Content validation boundary
 
-This release validates the multipart-declared MIME type and file size. It does **not** yet inspect magic bytes, transcode media, verify codecs, perform malware scanning, or run document content inspection.
+The upload path now validates the declared MIME type, file size, and a bounded content signature/container prefix before resolving sender credentials or calling Meta.
 
-Meta still validates the provider upload. For deployments that accept untrusted end-user files, a later hardening slice should add controlled object storage/quarantine, MIME sniffing, malware/content scanning, retention/expiry policy, and only then provider upload.
+Current checks are intentionally conservative:
+
+- JPEG and PNG use their standard binary signatures;
+- PDF requires a `%PDF-` marker near the beginning of the file;
+- Ogg, AAC/ADIF, MP3 and AMR use their common stream/file signatures;
+- MP4 audio/video require an ISO Base Media File Format `ftyp` marker;
+- `video/3gpp` additionally requires a 3GP/3G2-compatible brand marker;
+- legacy Word/Excel/PowerPoint MIME types require the shared OLE compound-document signature;
+- OOXML Word/Excel/PowerPoint MIME types require the ZIP container signature;
+- `text/plain` receives a basic binary/NUL-byte screen because plain text has no stable magic signature.
+
+These checks validate the declared type at the signature or shared-container level. They do **not** verify media codecs, parse the complete Office/ZIP structure, transcode media, perform malware scanning, or run document content inspection. A syntactically matching container can still contain unsafe or semantically invalid content.
+
+Meta continues to validate the provider upload. Deployments that accept untrusted end-user files should add malware/content scanning plus controlled quarantine/object storage and explicit retention/expiry policy before treating uploads as trusted assets.
 
 ## Integration coverage
 
@@ -129,9 +148,13 @@ HTTP multipart request
   -> authenticated media:write scope
   -> tenant sender
   -> disk-backed temporary file
+  -> declared MIME + size policy
+  -> bounded JPEG signature check
   -> native Node FormData
   -> Meta HTTP mock /media endpoint
   -> returned mediaId
 ```
 
 The test also verifies the provider Authorization header, multipart boundary, `messaging_product=whatsapp`, the generated provider filename, and that the original client filename is not forwarded.
+
+Unit coverage validates representative signatures for every supported MIME family and explicitly verifies that a PNG declared as `image/jpeg` is rejected before tenant sender resolution/provider access while the temporary file is still deleted.
