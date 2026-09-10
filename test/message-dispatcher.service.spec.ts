@@ -53,7 +53,7 @@ describe("MessageDispatcherService", () => {
     });
   });
 
-  it("does not call Meta when another worker owns an active message lease", async () => {
+  it("does not call Meta or consume retry budget when another worker owns an active message lease", async () => {
     messageUpdateMany.mockResolvedValue({ count: 0 });
     messageFindUnique.mockResolvedValue({
       id: "fcddeed9-3bcc-4e47-a44c-95179141779a",
@@ -64,12 +64,12 @@ describe("MessageDispatcherService", () => {
 
     const result = await service.dispatch({
       messageId: "fcddeed9-3bcc-4e47-a44c-95179141779a",
-      attempt: 0,
+      attempt: 4,
       trafficClass: MessageTrafficClass.TRANSACTIONAL,
     });
 
     expect(result).toEqual({
-      action: "retry",
+      action: "defer",
       reason: "Message is currently leased by another worker",
     });
     expect(resolveSender).not.toHaveBeenCalled();
