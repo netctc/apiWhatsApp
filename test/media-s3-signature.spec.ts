@@ -48,4 +48,28 @@ describe("S3 Signature V4", () => {
       "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token",
     );
   });
+
+  it("keeps signer-derived security headers authoritative over optional caller headers", () => {
+    const signed = createS3SignedHeaders({
+      method: "HEAD",
+      url: new URL("https://storage.example.com/media-bucket"),
+      region: "eu-west-1",
+      accessKeyId: "test-access",
+      secretAccessKey: "test-secret",
+      sessionToken: "expected-session-token",
+      payloadHash: EMPTY_SHA256,
+      date: new Date("2026-09-10T12:00:00.000Z"),
+      headers: {
+        Host: "attacker.example.com",
+        "x-amz-date": "19990101T000000Z",
+        "x-amz-content-sha256": "bad-payload-hash",
+        "x-amz-security-token": "bad-session-token",
+      },
+    });
+
+    expect(signed.headers.host).toBe("storage.example.com");
+    expect(signed.headers["x-amz-date"]).toBe("20260910T120000Z");
+    expect(signed.headers["x-amz-content-sha256"]).toBe(EMPTY_SHA256);
+    expect(signed.headers["x-amz-security-token"]).toBe("expected-session-token");
+  });
 });
