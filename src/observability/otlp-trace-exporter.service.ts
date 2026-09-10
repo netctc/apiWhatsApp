@@ -255,7 +255,7 @@ export class OtlpTraceExporterService implements OnModuleDestroy {
     );
     const maxBatchSize = this.readInteger(
       process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
-      DEFAULT_BATCH_SIZE,
+      Math.min(DEFAULT_BATCH_SIZE, maxQueueSize),
       1,
       maxQueueSize,
     );
