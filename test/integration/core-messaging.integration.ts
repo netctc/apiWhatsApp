@@ -268,6 +268,9 @@ describe("core messaging integration", () => {
         await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: messageIds } } });
         await prisma.message.deleteMany({ where: { id: { in: messageIds } } });
       }
+      await prisma.conversationNote.deleteMany({ where: { tenantId } });
+      await prisma.conversation.deleteMany({ where: { tenantId } });
+      await prisma.inboxAgent.deleteMany({ where: { tenantId } });
       await prisma.contact.deleteMany({ where: { tenantId } });
       await prisma.whatsAppPhoneNumber.deleteMany({ where: { tenantId } });
       await prisma.apiKey.deleteMany({ where: { tenantId } });
