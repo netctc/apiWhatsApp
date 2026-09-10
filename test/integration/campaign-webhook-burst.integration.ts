@@ -25,6 +25,11 @@ interface WebhookResult {
   error?: string;
 }
 
+interface CampaignProgressSnapshot {
+  status: CampaignStatus;
+  queuedRecipients: number;
+}
+
 function requireInfrastructure(): void {
   for (const name of ["DATABASE_URL", "REDIS_URL", "RABBITMQ_URL"] as const) {
     if (!process.env[name]) {
@@ -77,26 +82,26 @@ async function waitForCampaignInProgress(
   prisma: PrismaService,
   campaignId: string,
   timeoutMs = 5000,
-): Promise<void> {
+): Promise<CampaignProgressSnapshot> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const campaign = await prisma.campaign.findUnique({
       where: { id: campaignId },
       select: { status: true, queuedRecipients: true },
     });
-    const queued = await prisma.campaignRecipient.count({
-      where: { campaignId, status: CampaignRecipientStatus.QUEUED },
-    });
 
     if (
       campaign?.status === CampaignStatus.RUNNING &&
-      queued > 0 &&
-      queued < RECIPIENT_COUNT
+      campaign.queuedRecipients > 0 &&
+      campaign.queuedRecipients < RECIPIENT_COUNT
     ) {
-      return;
+      return campaign;
     }
 
     if (Date.now() >= deadline) {
+      const queued = await prisma.campaignRecipient.count({
+        where: { campaignId, status: CampaignRecipientStatus.QUEUED },
+      });
       throw new Error(
         `Timed out waiting for active campaign progress: ${JSON.stringify({ campaign, queued })}`,
       );
@@ -434,12 +439,7 @@ describe("campaign and webhook burst integration", () => {
   });
 
   it("keeps campaign and inbound webhook pipelines progressing under concurrent burst load", async () => {
-    await waitForCampaignInProgress(prisma, campaignId);
-
-    const beforeBurst = await prisma.campaign.findUniqueOrThrow({
-      where: { id: campaignId },
-      select: { status: true, queuedRecipients: true },
-    });
+    const beforeBurst = await waitForCampaignInProgress(prisma, campaignId);
     expect(beforeBurst.status).toBe(CampaignStatus.RUNNING);
     expect(beforeBurst.queuedRecipients).toBeGreaterThan(0);
     expect(beforeBurst.queuedRecipients).toBeLessThan(RECIPIENT_COUNT);
