@@ -3,11 +3,16 @@ import { access, mkdir, rm, stat, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Injectable } from "@nestjs/common";
+import {
+  MediaS3StorageError,
+  MediaS3StorageService,
+  type MediaS3Diagnostics,
+} from "./media-s3-storage.service.js";
 
 const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_MIN_FREE_PERCENT = 5;
 
-export type MediaBinaryStorageMode = "DISABLED" | "FILESYSTEM";
+export type MediaBinaryStorageMode = "DISABLED" | "FILESYSTEM" | "S3";
 
 export interface MediaBinaryStorageTarget {
   mode: MediaBinaryStorageMode;
@@ -38,7 +43,8 @@ export type MediaBinaryStorageDiagnostics =
       status: "down";
       mode: "filesystem" | "invalid";
       error: "not_configured";
-    };
+    }
+  | MediaS3Diagnostics;
 
 export class MediaBinaryStorageError extends Error {
   constructor(message: string) {
@@ -49,14 +55,28 @@ export class MediaBinaryStorageError extends Error {
 
 @Injectable()
 export class MediaBinaryStorageService {
+  constructor(private readonly s3: MediaS3StorageService = new MediaS3StorageService()) {}
+
   targetFor(tenantId: string, assetId: string): MediaBinaryStorageTarget {
     const mode = this.mode();
     if (mode === "DISABLED") {
       return { mode, key: null };
     }
 
-    const root = this.filesystemRoot();
     const key = `${tenantId}/${assetId}`;
+    if (mode === "S3") {
+      try {
+        this.s3.assertConfigured();
+      } catch (error) {
+        if (error instanceof MediaS3StorageError) {
+          throw new MediaBinaryStorageError("S3 media storage is not configured correctly");
+        }
+        throw error;
+      }
+      return { mode, key };
+    }
+
+    const root = this.filesystemRoot();
     this.pathForKey(root, key);
     return { mode, key };
   }
@@ -69,6 +89,26 @@ export class MediaBinaryStorageService {
         storedAt: null,
       };
     }
+
+    if (target.mode === "S3") {
+      if (!target.key) {
+        throw new MediaBinaryStorageError("Invalid S3 media storage target");
+      }
+      try {
+        const storedAt = await this.s3.putObject(target.key, sourcePath);
+        return {
+          ...target,
+          filePath: sourcePath,
+          storedAt,
+        };
+      } catch (error) {
+        if (error instanceof MediaS3StorageError) {
+          throw new MediaBinaryStorageError("Unable to stage media binary in S3 storage");
+        }
+        throw error;
+      }
+    }
+
     if (target.mode !== "FILESYSTEM" || !target.key) {
       throw new MediaBinaryStorageError("Invalid filesystem media storage target");
     }
@@ -100,6 +140,19 @@ export class MediaBinaryStorageService {
     if (!key || mode === "DISABLED") {
       return;
     }
+
+    if (mode === "S3") {
+      try {
+        await this.s3.deleteObject(key);
+        return;
+      } catch (error) {
+        if (error instanceof MediaS3StorageError) {
+          throw new MediaBinaryStorageError("Unable to delete stored S3 media binary");
+        }
+        throw error;
+      }
+    }
+
     if (mode !== "FILESYSTEM") {
       throw new MediaBinaryStorageError(`Unsupported persisted media storage mode: ${mode}`);
     }
@@ -130,6 +183,10 @@ export class MediaBinaryStorageService {
         status: "up",
         mode: "disabled",
       };
+    }
+
+    if (mode === "S3") {
+      return this.s3.diagnostics();
     }
 
     let root: string;
@@ -207,6 +264,9 @@ export class MediaBinaryStorageService {
     }
     if (value === "filesystem") {
       return "FILESYSTEM";
+    }
+    if (value === "s3") {
+      return "S3";
     }
     throw new MediaBinaryStorageError(`Unsupported MEDIA_BINARY_STORAGE_MODE: ${value}`);
   }
