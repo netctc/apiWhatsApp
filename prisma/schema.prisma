@@ -376,7 +376,7 @@ model MediaAsset {
   id                 String              @id @default(uuid()) @db.Uuid
   tenantId           String              @db.Uuid
   senderId           String              @db.Uuid
-  providerMediaId    String?             @unique
+  providerMediaId    String?
   category           String
   mimeType           String
   size               Int
@@ -389,8 +389,9 @@ model MediaAsset {
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  sender             WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  sender             WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Restrict)
 
+  @@unique([tenantId, providerMediaId])
   @@index([tenantId, createdAt])
   @@index([tenantId, expiresAt, createdAt])
   @@index([tenantId, senderId, createdAt])
