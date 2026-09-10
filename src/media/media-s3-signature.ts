@@ -24,11 +24,11 @@ export function createS3SignedHeaders(input: S3SignatureInput): S3SignedHeaders 
   const amzDate = formatAmzDate(input.date);
   const dateStamp = amzDate.slice(0, 8);
   const headers = normalizeHeaders({
+    ...(input.headers ?? {}),
     host: input.url.host,
     "x-amz-content-sha256": input.payloadHash,
     "x-amz-date": amzDate,
     ...(input.sessionToken ? { "x-amz-security-token": input.sessionToken } : {}),
-    ...(input.headers ?? {}),
   });
   const signedHeaderNames = Object.keys(headers).sort();
   const signedHeaders = signedHeaderNames.join(";");
@@ -66,9 +66,15 @@ export function createS3SignedHeaders(input: S3SignatureInput): S3SignedHeaders 
 function canonicalQuery(url: URL): string {
   return [...url.searchParams.entries()]
     .map(([name, value]) => [awsUriEncode(name), awsUriEncode(value)] as const)
-    .sort(([nameA, valueA], [nameB, valueB]) =>
-      nameA === nameB ? valueA.localeCompare(valueB) : nameA.localeCompare(nameB),
-    )
+    .sort(([nameA, valueA], [nameB, valueB]) => {
+      if (nameA !== nameB) {
+        return nameA < nameB ? -1 : 1;
+      }
+      if (valueA === valueB) {
+        return 0;
+      }
+      return valueA < valueB ? -1 : 1;
+    })
     .map(([name, value]) => `${name}=${value}`)
     .join("&");
 }
