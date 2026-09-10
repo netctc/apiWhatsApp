@@ -233,26 +233,31 @@ describe("transactional outbox RabbitMQ recovery integration", () => {
 
   afterAll(async () => {
     process.env.RABBITMQ_URL = realRabbitMqUrl;
-
     await worker?.close();
     await app?.close();
 
-    if (prisma && tenantId) {
-      const messages = await prisma.message.findMany({
-        where: { tenantId },
-        select: { id: true },
-      }).catch(() => [] as Array<{ id: string }>);
-      const messageIds = messages.map((message) => message.id);
-      if (messageIds.length > 0) {
-        await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: messageIds } } }).catch(() => undefined);
-        await prisma.message.deleteMany({ where: { id: { in: messageIds } } }).catch(() => undefined);
+    const cleanup = new PrismaService();
+    try {
+      await cleanup.$connect();
+      if (tenantId) {
+        const messages = await cleanup.message.findMany({
+          where: { tenantId },
+          select: { id: true },
+        });
+        const messageIds = messages.map((message) => message.id);
+        if (messageIds.length > 0) {
+          await cleanup.outboxEvent.deleteMany({ where: { aggregateId: { in: messageIds } } });
+          await cleanup.message.deleteMany({ where: { id: { in: messageIds } } });
+        }
+        await cleanup.conversationNote.deleteMany({ where: { tenantId } });
+        await cleanup.conversation.deleteMany({ where: { tenantId } });
+        await cleanup.contact.deleteMany({ where: { tenantId } });
+        await cleanup.whatsAppPhoneNumber.deleteMany({ where: { tenantId } });
+        await cleanup.apiKey.deleteMany({ where: { tenantId } });
+        await cleanup.tenant.deleteMany({ where: { id: tenantId } });
       }
-      await prisma.conversationNote.deleteMany({ where: { tenantId } }).catch(() => undefined);
-      await prisma.conversation.deleteMany({ where: { tenantId } }).catch(() => undefined);
-      await prisma.contact.deleteMany({ where: { tenantId } }).catch(() => undefined);
-      await prisma.whatsAppPhoneNumber.deleteMany({ where: { tenantId } }).catch(() => undefined);
-      await prisma.apiKey.deleteMany({ where: { tenantId } }).catch(() => undefined);
-      await prisma.tenant.deleteMany({ where: { id: tenantId } }).catch(() => undefined);
+    } finally {
+      await cleanup.$disconnect();
     }
 
     if (metaServer) {
