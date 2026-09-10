@@ -296,7 +296,7 @@ export class OtlpTraceExporterService implements OnModuleDestroy {
 
   private traceEndpointFromGeneric(endpoint: URL): URL {
     const result = new URL(endpoint.toString());
-    result.pathname = `${result.pathname.replace(/\/+$/, "")}/v1/traces` || "/v1/traces";
+    result.pathname = `${result.pathname.replace(/\/+$/, "")}/v1/traces`;
     return result;
   }
 
