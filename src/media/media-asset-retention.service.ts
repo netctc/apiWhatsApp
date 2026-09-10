@@ -5,17 +5,22 @@ import {
   OnModuleDestroy,
 } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { MediaBinaryStorageService } from "./media-binary-storage.service.js";
 
 const DEFAULT_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const MIN_CLEANUP_INTERVAL_MS = 60 * 1000;
 const MAX_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const CLEANUP_BATCH_SIZE = 200;
 
 @Injectable()
 export class MediaAssetRetentionService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(MediaAssetRetentionService.name);
   private cleanupTimer?: NodeJS.Timeout;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly binaryStorage: MediaBinaryStorageService,
+  ) {}
 
   async onApplicationBootstrap(): Promise<void> {
     const intervalMs = this.readCleanupIntervalMs();
@@ -43,16 +48,43 @@ export class MediaAssetRetentionService implements OnApplicationBootstrap, OnMod
   }
 
   async purgeExpired(now = new Date()): Promise<number> {
-    const result = await this.prisma.mediaAsset.deleteMany({
+    const assets = await this.prisma.mediaAsset.findMany({
       where: {
         expiresAt: { lte: now },
       },
+      orderBy: [{ expiresAt: "asc" }, { createdAt: "asc" }],
+      take: CLEANUP_BATCH_SIZE,
+      select: {
+        id: true,
+        storageMode: true,
+        storageKey: true,
+      },
     });
 
-    if (result.count > 0) {
-      this.logger.log(`Deleted ${result.count} expired media asset registry entr${result.count === 1 ? "y" : "ies"}`);
+    let deleted = 0;
+    for (const asset of assets) {
+      try {
+        await this.binaryStorage.discard(asset.storageMode, asset.storageKey);
+      } catch (error) {
+        this.logger.error(
+          `Unable to remove expired media binary asset=${asset.id} mode=${asset.storageMode}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        continue;
+      }
+
+      const result = await this.prisma.mediaAsset.deleteMany({
+        where: {
+          id: asset.id,
+          expiresAt: { lte: now },
+        },
+      });
+      deleted += result.count;
     }
-    return result.count;
+
+    if (deleted > 0) {
+      this.logger.log(`Deleted ${deleted} expired media asset registry entr${deleted === 1 ? "y" : "ies"}`);
+    }
+    return deleted;
   }
 
   private readCleanupIntervalMs(): number {
