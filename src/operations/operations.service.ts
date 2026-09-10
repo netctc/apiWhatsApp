@@ -126,12 +126,12 @@ export class OperationsService {
               AND a."expiresAt" <= NOW()
           )::int AS "expired",
           COUNT(*) FILTER (
-            WHERE a."storageMode" = 'FILESYSTEM'
+            WHERE a."storageMode" <> 'DISABLED'
               AND a."storageKey" IS NOT NULL
               AND a."storedAt" IS NOT NULL
           )::int AS "retainedBinaries",
           COALESCE(SUM(a."size") FILTER (
-            WHERE a."storageMode" = 'FILESYSTEM'
+            WHERE a."storageMode" <> 'DISABLED'
               AND a."storageKey" IS NOT NULL
               AND a."storedAt" IS NOT NULL
           ), 0)::double precision AS "retainedBytes",
