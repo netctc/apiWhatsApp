@@ -1,4 +1,5 @@
 import { MessageType } from "../generated/prisma/client.js";
+import { normalizeMediaPayload } from "../messages/media-payload.util.js";
 
 interface OutboundMessageRecord {
   type: MessageType;
@@ -6,11 +7,18 @@ interface OutboundMessageRecord {
   payload: unknown;
 }
 
+interface MetaMediaObject {
+  id?: string;
+  link?: string;
+  caption?: string;
+  filename?: string;
+}
+
 interface MetaMessagePayload {
   messaging_product: "whatsapp";
   recipient_type: "individual";
   to: string;
-  type: "text" | "template";
+  type: "text" | "template" | "image" | "video" | "audio" | "document";
   text?: {
     body: string;
     preview_url?: boolean;
@@ -20,6 +28,10 @@ interface MetaMessagePayload {
     language: { code: string };
     components?: unknown[];
   };
+  image?: MetaMediaObject;
+  video?: MetaMediaObject;
+  audio?: MetaMediaObject;
+  document?: MetaMediaObject;
 }
 
 export function mapMessageToMetaPayload(message: OutboundMessageRecord): MetaMessagePayload {
@@ -31,6 +43,14 @@ export function mapMessageToMetaPayload(message: OutboundMessageRecord): MetaMes
       return mapTextMessage(to, payload);
     case MessageType.TEMPLATE:
       return mapTemplateMessage(to, payload);
+    case MessageType.IMAGE:
+      return mapMediaMessage(to, "IMAGE", payload);
+    case MessageType.VIDEO:
+      return mapMediaMessage(to, "VIDEO", payload);
+    case MessageType.AUDIO:
+      return mapMediaMessage(to, "AUDIO", payload);
+    case MessageType.DOCUMENT:
+      return mapMediaMessage(to, "DOCUMENT", payload);
     default:
       throw new Error(`Unsupported outbound message type: ${message.type}`);
   }
@@ -87,6 +107,49 @@ function mapTemplateMessage(to: string, payload: Record<string, unknown>): MetaM
       ...(Array.isArray(components) ? { components } : {}),
     },
   };
+}
+
+function mapMediaMessage(
+  to: string,
+  type: "IMAGE" | "VIDEO" | "AUDIO" | "DOCUMENT",
+  payload: Record<string, unknown>,
+): MetaMessagePayload {
+  const media = normalizeMediaPayload(type, payload);
+
+  switch (type) {
+    case "IMAGE":
+      return {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "image",
+        image: media,
+      };
+    case "VIDEO":
+      return {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "video",
+        video: media,
+      };
+    case "AUDIO":
+      return {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "audio",
+        audio: media,
+      };
+    case "DOCUMENT":
+      return {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "document",
+        document: media,
+      };
+  }
 }
 
 function normalizeRecipient(value: string | null): string {
