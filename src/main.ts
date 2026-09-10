@@ -3,6 +3,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module.js";
+import { APP_VERSION } from "./version.js";
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { rawBody: true });
@@ -19,7 +20,7 @@ async function bootstrap(): Promise<void> {
   const swaggerConfig = new DocumentBuilder()
     .setTitle("apiWhatsApp")
     .setDescription("Enterprise WhatsApp Business Platform API")
-    .setVersion("0.16.0")
+    .setVersion(APP_VERSION)
     .addApiKey(
       {
         type: "apiKey",
