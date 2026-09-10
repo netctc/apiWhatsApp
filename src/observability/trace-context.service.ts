@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes, randomUUID } from "node:crypto";
 
@@ -7,6 +7,9 @@ const SPAN_ID_PATTERN = /^[0-9a-f]{16}$/;
 const TRACE_FLAGS_PATTERN = /^[0-9a-f]{2}$/;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:@/-]{1,128}$/;
 const TRACEPARENT_PATTERN = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+const TRACE_ID_RATIO_RANGE = 1n << 63n;
+const TRACE_ID_RATIO_PRECISION = 1n << 53n;
+const DEFAULT_SAMPLER: TraceSamplerName = "parentbased_always_on";
 
 export interface TraceContext {
   requestId: string;
@@ -23,9 +26,28 @@ export interface TraceCarrier {
   requestId?: string;
 }
 
+type TraceSamplerName =
+  | "always_on"
+  | "always_off"
+  | "traceidratio"
+  | "parentbased_always_on"
+  | "parentbased_always_off"
+  | "parentbased_traceidratio";
+
+interface TraceSamplerConfiguration {
+  name: TraceSamplerName;
+  ratioThreshold: bigint;
+}
+
 @Injectable()
 export class TraceContextService {
+  private readonly logger = new Logger(TraceContextService.name);
   private readonly storage = new AsyncLocalStorage<TraceContext>();
+  private readonly sampler: TraceSamplerConfiguration;
+
+  constructor() {
+    this.sampler = this.readSampler();
+  }
 
   current(): TraceContext | undefined {
     return this.storage.getStore();
@@ -37,12 +59,13 @@ export class TraceContextService {
 
   createIncoming(traceparent?: string, requestId?: string): TraceContext {
     const parsed = this.parseTraceparent(traceparent);
+    const traceId = parsed?.traceId ?? this.randomTraceId();
     return {
       requestId: this.safeRequestId(requestId),
-      traceId: parsed?.traceId ?? this.randomTraceId(),
+      traceId,
       spanId: this.randomSpanId(),
       ...(parsed ? { parentSpanId: parsed.parentSpanId } : {}),
-      traceFlags: parsed?.traceFlags ?? "01",
+      traceFlags: this.samplingFlags(traceId, parsed?.traceFlags, Boolean(parsed)),
     };
   }
 
@@ -53,9 +76,11 @@ export class TraceContextService {
     const parentSpanId = carrier?.parentSpanId && this.validSpanId(carrier.parentSpanId)
       ? carrier.parentSpanId
       : undefined;
-    const traceFlags = carrier?.traceFlags && TRACE_FLAGS_PATTERN.test(carrier.traceFlags)
+    const parentFlags = carrier?.traceFlags && TRACE_FLAGS_PATTERN.test(carrier.traceFlags)
       ? carrier.traceFlags
-      : "01";
+      : parentSpanId
+        ? "01"
+        : undefined;
 
     return this.run(
       {
@@ -63,7 +88,7 @@ export class TraceContextService {
         traceId,
         spanId: this.randomSpanId(),
         ...(parentSpanId ? { parentSpanId } : {}),
-        traceFlags,
+        traceFlags: this.samplingFlags(traceId, parentFlags, Boolean(parentSpanId)),
       },
       callback,
     );
@@ -133,6 +158,106 @@ export class TraceContextService {
       return undefined;
     }
     return { traceId, parentSpanId, traceFlags };
+  }
+
+  private readSampler(): TraceSamplerConfiguration {
+    const rawName = (process.env.OTEL_TRACES_SAMPLER ?? DEFAULT_SAMPLER).trim().toLowerCase();
+    const name = this.supportedSampler(rawName);
+    if (!name) {
+      this.logger.error(
+        `Unsupported OTEL_TRACES_SAMPLER=${rawName}; using ${DEFAULT_SAMPLER}`,
+      );
+      return { name: DEFAULT_SAMPLER, ratioThreshold: TRACE_ID_RATIO_RANGE };
+    }
+
+    if (name !== "traceidratio" && name !== "parentbased_traceidratio") {
+      return { name, ratioThreshold: TRACE_ID_RATIO_RANGE };
+    }
+
+    return {
+      name,
+      ratioThreshold: this.readRatioThreshold(process.env.OTEL_TRACES_SAMPLER_ARG),
+    };
+  }
+
+  private supportedSampler(value: string): TraceSamplerName | undefined {
+    switch (value) {
+      case "always_on":
+      case "always_off":
+      case "traceidratio":
+      case "parentbased_always_on":
+      case "parentbased_always_off":
+      case "parentbased_traceidratio":
+        return value;
+      default:
+        return undefined;
+    }
+  }
+
+  private readRatioThreshold(raw: string | undefined): bigint {
+    if (raw === undefined || raw.trim() === "") {
+      return TRACE_ID_RATIO_RANGE;
+    }
+    const ratio = Number(raw);
+    if (!Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+      this.logger.error("Invalid OTEL_TRACES_SAMPLER_ARG; using trace ratio 1.0");
+      return TRACE_ID_RATIO_RANGE;
+    }
+    if (ratio <= 0) {
+      return 0n;
+    }
+    if (ratio >= 1) {
+      return TRACE_ID_RATIO_RANGE;
+    }
+
+    const scaled = BigInt(Math.floor(ratio * Number(TRACE_ID_RATIO_PRECISION)));
+    return scaled * (TRACE_ID_RATIO_RANGE / TRACE_ID_RATIO_PRECISION);
+  }
+
+  private samplingFlags(traceId: string, parentFlags: string | undefined, hasParent: boolean): string {
+    const existingFlags = parentFlags && TRACE_FLAGS_PATTERN.test(parentFlags)
+      ? Number.parseInt(parentFlags, 16)
+      : 0;
+    let sampled: boolean;
+
+    switch (this.sampler.name) {
+      case "always_on":
+        sampled = true;
+        break;
+      case "always_off":
+        sampled = false;
+        break;
+      case "traceidratio":
+        sampled = this.sampleTraceId(traceId);
+        break;
+      case "parentbased_always_off":
+        sampled = hasParent ? (existingFlags & 0x01) === 0x01 : false;
+        break;
+      case "parentbased_traceidratio":
+        sampled = hasParent
+          ? (existingFlags & 0x01) === 0x01
+          : this.sampleTraceId(traceId);
+        break;
+      case "parentbased_always_on":
+      default:
+        sampled = hasParent ? (existingFlags & 0x01) === 0x01 : true;
+        break;
+    }
+
+    const flags = (existingFlags & 0xfe) | (sampled ? 0x01 : 0x00);
+    return flags.toString(16).padStart(2, "0");
+  }
+
+  private sampleTraceId(traceId: string): boolean {
+    if (this.sampler.ratioThreshold <= 0n) {
+      return false;
+    }
+    if (this.sampler.ratioThreshold >= TRACE_ID_RATIO_RANGE) {
+      return true;
+    }
+    const low64 = BigInt(`0x${traceId.slice(16)}`);
+    const positive63 = low64 >> 1n;
+    return positive63 < this.sampler.ratioThreshold;
   }
 
   private safeRequestId(value?: string): string {
