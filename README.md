@@ -18,7 +18,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - WABA template synchronization and lifecycle tracking
 - Local `APPROVED` template enforcement before outbound creation
 - Outbound text plus image/video/audio/document media messaging
-- Tenant-scoped direct media upload with bounded disk-backed multipart handling, MIME/content signature validation, optional fail-closed ClamAV scanning, an expiring registry, and optional controlled filesystem binary retention
+- Tenant-scoped direct media upload with bounded disk-backed multipart handling, MIME/content signature validation, optional fail-closed ClamAV scanning, an expiring registry, and optional controlled filesystem or S3-compatible binary retention
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues, retry queues, DLQs, and traffic-class prefetch
 - Priority-aware Redis sender capacity reservation
@@ -48,7 +48,7 @@ flowchart LR
     Temp --> Scan[Optional ClamAV scan]
     Scan --> MediaRegistry[Media Asset Metadata]
     MediaRegistry --> DB
-    MediaRegistry --> Store[Optional Retained Filesystem]
+    MediaRegistry --> Store[Optional Retained Filesystem / S3]
     Store --> Meta[Meta Cloud API]
     Scan --> Meta
     DB --> Inbox[Conversation Read Model]
@@ -72,7 +72,7 @@ flowchart LR
 
 Outbound message requests accept and persist work quickly; WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
 
-Media upload is intentionally different: it is a bounded synchronous provider operation. The service validates a disk-backed temporary file, optionally scans it, reserves tenant-scoped expiring metadata, optionally retains the scanned bytes under a server-derived filesystem key, uploads to Meta, finalizes the registry lifecycle, and always removes the multipart temporary file. The storage key is persisted before bytes are copied, so abrupt process termination cannot create an unreferenced retained object in the normal application flow.
+Media upload is intentionally different: it is a bounded synchronous provider operation. The service validates a disk-backed temporary file, optionally scans it, reserves tenant-scoped expiring metadata, optionally retains the scanned bytes under a server-derived filesystem/S3 key, uploads to Meta, finalizes the registry lifecycle, and always removes the multipart temporary file. The storage key is persisted before bytes are stored, so abrupt process termination cannot remove the application cleanup reference to a retained object in the normal flow.
 
 The agent inbox is an operational layer over the authoritative `Message` store. Conversation rows keep assignment/state/activity data; message payloads and provider lifecycle remain on `Message`.
 
@@ -92,7 +92,7 @@ Campaigns reuse the normal message pipeline. They cannot bypass tenant ownership
 - Meta access token for each configured sender
 - Meta app secret and webhook verify token
 - Optional ClamAV service when malware scanning is enabled
-- Optional protected persistent/shared filesystem when media binary retention is enabled
+- Optional protected persistent/shared filesystem or private S3-compatible bucket when media binary retention is enabled
 
 ## Local setup
 
@@ -213,7 +213,7 @@ file       required
 senderId   optional tenant-scoped sender UUID
 ```
 
-The upload endpoint writes one upload to OS/container temporary storage rather than buffering the full file in Node.js heap. It validates multipart fields, declared MIME/size and a bounded content signature. Storage configuration is validated before credential access; optional ClamAV scanning then runs on the temporary file. Only after a clean scan does the service resolve the tenant sender, reserve an expiring `MediaAsset`, and optionally stream-copy the bytes to controlled filesystem storage. Meta receives either the retained copy or, when retention is disabled, the original temporary file.
+The upload endpoint writes one upload to OS/container temporary storage rather than buffering the full file in Node.js heap. It validates multipart fields, declared MIME/size and a bounded content signature. Storage configuration is validated before credential access; optional ClamAV scanning then runs on the temporary file. Only after a clean scan does the service resolve the tenant sender, reserve an expiring `MediaAsset`, and optionally retain the bytes through the configured filesystem or S3-compatible backend. Retained storage succeeds before Meta is called.
 
 Current local limits are intentionally at or below provider limits:
 
@@ -236,9 +236,9 @@ Example upload response remains backward compatible:
 }
 ```
 
-Registry rows derive `UPLOADING`, `ACTIVE`, `EXPIRED`, or `FAILED` state and expose safe storage evidence (`storageMode`, `binaryRetained`, `storedAt`) without exposing the internal storage key or raw path.
+Registry rows derive `UPLOADING`, `ACTIVE`, `EXPIRED`, or `FAILED` state and expose safe storage evidence (`storageMode`, `binaryRetained`, `storedAt`) without exposing the internal storage key, filesystem path, S3 bucket/endpoint, or storage credentials.
 
-Binary retention is disabled by default. To enable the filesystem backend:
+Binary retention is disabled by default. Filesystem mode uses:
 
 ```text
 MEDIA_BINARY_STORAGE_MODE=filesystem
@@ -247,9 +247,22 @@ MEDIA_FILESYSTEM_STORAGE_PATH=/var/lib/api-whatsapp/media
 
 The path must be absolute and non-root. Files use server-derived `<tenant UUID>/<asset UUID>` keys, exclusive streaming creation and restrictive file/directory modes. Multi-replica deployments require persistent shared storage visible to every API replica that can upload or perform retention cleanup.
 
-`MEDIA_ASSET_TTL_DAYS` controls both registry metadata and retained binary lifetime. `MEDIA_ASSET_CLEANUP_INTERVAL_MS` controls periodic cleanup. Expired binaries are deleted before their registry row; if binary deletion fails, the row remains so cleanup can retry later. These settings do not claim or modify Meta's provider-side media retention semantics.
+S3-compatible mode uses:
 
-S3-compatible/object storage and deeper content validation remain future hardening. See `docs/media-upload.md` for security, crash-recovery and retention semantics.
+```text
+MEDIA_BINARY_STORAGE_MODE=s3
+MEDIA_S3_ENDPOINT=https://s3.example.internal
+MEDIA_S3_BUCKET=whatsapp-media
+MEDIA_S3_REGION=us-east-1
+MEDIA_S3_ACCESS_KEY_ID=<runtime-secret>
+MEDIA_S3_SECRET_ACCESS_KEY=<runtime-secret>
+```
+
+S3 requests use server-derived `<tenant UUID>/<asset UUID>` keys and AWS Signature Version 4. The file is SHA-256 hashed by streaming from disk and then streamed to the object store with the signed full payload hash. The bucket remains private; no public object URL or media download endpoint is created.
+
+`MEDIA_ASSET_TTL_DAYS` controls both registry metadata and retained binary lifetime. `MEDIA_ASSET_CLEANUP_INTERVAL_MS` controls periodic cleanup. Expired binaries are deleted before their registry row; if backend deletion fails, the row remains so cleanup can retry later. These settings do not claim or modify Meta's provider-side media retention semantics.
+
+See `docs/media-upload.md` for the complete security/crash-recovery lifecycle and `docs/media-s3-storage.md` for the S3 endpoint, signing, readiness and permission contract. Deeper content validation, asynchronous quarantine/reconciliation, object-lock/legal-hold policy and independent object-store lifecycle rules remain future hardening.
 
 ## Senders and templates
 
@@ -412,7 +425,7 @@ GET /api/health/live
 GET /api/health/ready
 ```
 
-Readiness checks PostgreSQL, Redis, and RabbitMQ with bounded timeouts.
+Readiness checks PostgreSQL, Redis, RabbitMQ and the configured media-storage backend with bounded timeouts/diagnostics. Filesystem mode also enforces configured free-capacity reserves; S3 mode uses a signed bucket readiness check.
 
 Tenant operational diagnostics:
 
@@ -441,9 +454,11 @@ Core coverage proves:
 
 ```text
 text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mock -> SUBMITTED
-multipart media -> temp -> signature/scan -> MediaAsset planned storage key -> retained filesystem bytes -> Meta mock /media -> mediaId
-expired retained MediaAsset -> binary delete -> registry delete -> detail 404
+multipart media -> temp -> signature/scan -> MediaAsset planned key -> retained filesystem or S3 bytes -> Meta mock /media -> mediaId
+expired retained MediaAsset -> backend binary delete -> registry delete -> detail 404
 ```
+
+S3 coverage additionally requires the signed object PUT to complete before Meta upload, validates exact bytes/hash/content length, checks storage readiness and tenant retained-byte operations evidence, and then proves signed object deletion before expired registry metadata is removed.
 
 Inbox coverage proves:
 
@@ -518,6 +533,15 @@ MEDIA_CLAMAV_PORT
 MEDIA_CLAMAV_TIMEOUT_MS
 MEDIA_BINARY_STORAGE_MODE
 MEDIA_FILESYSTEM_STORAGE_PATH
+MEDIA_FILESYSTEM_MIN_FREE_BYTES
+MEDIA_FILESYSTEM_MIN_FREE_PERCENT
+MEDIA_S3_ENDPOINT
+MEDIA_S3_BUCKET
+MEDIA_S3_REGION
+MEDIA_S3_ACCESS_KEY_ID
+MEDIA_S3_SECRET_ACCESS_KEY
+MEDIA_S3_SESSION_TOKEN
+MEDIA_S3_TIMEOUT_MS
 MEDIA_ASSET_TTL_DAYS
 MEDIA_ASSET_CLEANUP_INTERVAL_MS
 OUTBOUND_RETRY_DELAYS_MS
@@ -538,7 +562,7 @@ Never commit production credentials or access tokens.
 - production capacity / soak / new incident-driven failure-injection test expansion
 - OpenTelemetry span export and tracing-backend integration
 - provider-backed secret stores beyond environment references
-- S3-compatible media object storage, asynchronous scanning/reconciliation, deeper content validation, and storage-health/capacity diagnostics
+- asynchronous media quarantine/reconciliation, deeper content validation, and advanced object lifecycle/legal-hold policies
 - realtime inbox delivery (SSE/WebSocket), teams/skills, routing policies, SLA/escalation and human-agent session/SSO integration
 - optional inbox frontend application
 
