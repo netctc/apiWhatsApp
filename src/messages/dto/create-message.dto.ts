@@ -4,6 +4,10 @@ import { IsEnum, IsObject, IsOptional, IsString, IsUUID, MaxLength, MinLength } 
 export enum OutboundMessageType {
   TEXT = "TEXT",
   TEMPLATE = "TEMPLATE",
+  IMAGE = "IMAGE",
+  VIDEO = "VIDEO",
+  AUDIO = "AUDIO",
+  DOCUMENT = "DOCUMENT",
 }
 
 export class CreateMessageDto {
@@ -22,7 +26,10 @@ export class CreateMessageDto {
   @IsUUID()
   senderId?: string;
 
-  @ApiProperty({ description: "Provider-neutral message payload" })
+  @ApiProperty({
+    description:
+      "Provider-neutral message payload. Media messages require exactly one Meta media id or absolute HTTPS link.",
+  })
   @IsObject()
   payload!: Record<string, unknown>;
 
