@@ -1,6 +1,6 @@
 # Meta media upload
 
-Release `0.17.0` introduced the tenant-scoped upload endpoint for obtaining WhatsApp Cloud API media IDs. Subsequent hardening adds bounded content-signature validation, optional fail-closed ClamAV scanning, a tenant-scoped media asset registry, and optional controlled filesystem-backed binary retention.
+Release `0.17.0` introduced the tenant-scoped upload endpoint for obtaining WhatsApp Cloud API media IDs. Subsequent hardening adds bounded content-signature validation, optional fail-closed ClamAV scanning, a tenant-scoped media asset registry, and optional controlled binary retention on either a filesystem or an S3-compatible object store.
 
 ## Endpoints
 
@@ -52,7 +52,7 @@ authenticate + authorize
   -> delete multipart temporary file
 ```
 
-With controlled filesystem storage enabled:
+With a persistent retention backend enabled:
 
 ```text
 authenticate + authorize
@@ -62,18 +62,20 @@ authenticate + authorize
   -> plan internal tenant/asset storage key
   -> optional ClamAV scan of the temporary file
   -> resolve tenant sender
-  -> reserve MediaAsset with the planned storage key + TTL
-  -> stream-copy scanned bytes into controlled storage
+  -> reserve MediaAsset with planned storage key + TTL
+  -> persist scanned bytes in configured storage
   -> persist storedAt
-  -> POST /{phone-number-id}/media to Meta from the controlled copy
+  -> POST /{phone-number-id}/media to Meta
   -> finalize registry lifecycle
   -> delete multipart temporary file
   -> retain controlled copy until local TTL cleanup
 ```
 
-The storage key is persisted **before bytes are copied**. This removes the orphan window where an abrupt process death after a successful copy but before registry reservation could otherwise leave an unreferenced file. If the process dies during or after the copy, the registry already contains the intended key, so later retention cleanup can idempotently remove the path even when `storedAt` was never finalized.
+For filesystem retention, Meta reads from the retained filesystem copy. For S3 retention, the object is written first and Meta still reads from the original disk-backed temporary file; this avoids a storage round-trip while preserving the invariant that retained storage succeeds before provider upload.
 
-Malware scanning remains before sender credential resolution, registry reservation, and retained binary copy. A file rejected by the scanner is therefore never copied into retained storage.
+The storage key is persisted **before bytes are stored**. This removes the orphan-reference window where an abrupt process death after a successful storage write but before registry reservation could otherwise leave an unreferenced retained object. If the process dies during or after storage, the registry already contains the intended key, so later retention cleanup can idempotently remove the path/object even when `storedAt` was never finalized.
+
+Malware scanning remains before sender credential resolution, registry reservation, and retained binary storage. A file rejected by the scanner is therefore never copied into retained storage.
 
 ## Supported upload policy
 
@@ -124,17 +126,17 @@ The storage key is unique inside the tenant boundary and is derived from server-
 <tenant UUID>/<media asset UUID>
 ```
 
-The API deliberately does **not** expose `storageKey` or a filesystem path. Registry reads expose safe storage evidence only:
+The API deliberately does **not** expose `storageKey`, a filesystem path, an S3 endpoint, bucket name, or storage credentials. Registry reads expose safe storage evidence only, for example:
 
 ```json
 {
-  "storageMode": "FILESYSTEM",
+  "storageMode": "S3",
   "binaryRetained": true,
   "storedAt": "<timestamp>"
 }
 ```
 
-`binaryRetained` is true only when both a storage key and finalized `storedAt` exist. A crash may leave a planned key with no finalized storage timestamp; the key is still retained internally so expiry cleanup can remove any partial/complete file left at that location.
+`binaryRetained` is true only when both a storage key and finalized `storedAt` exist. A crash may leave a planned key with no finalized storage timestamp; the key is still retained internally so expiry cleanup can remove any partial/complete retained object left at that location.
 
 Registry states remain derived from durable lifecycle fields:
 
@@ -145,9 +147,9 @@ EXPIRED    providerMediaId present and local expiresAt has passed
 FAILED     failureCode present
 ```
 
-No Meta access token, provider response body, malware signature, contact identity, message payload, original filename, or raw filesystem path is returned through the registry API.
+No Meta access token, provider response body, malware signature, contact identity, message payload, original filename, raw filesystem path, bucket, endpoint, or object key is returned through the registry API.
 
-## Controlled filesystem storage
+## Binary retention modes
 
 Binary retention is opt-in and disabled by default:
 
@@ -155,11 +157,22 @@ Binary retention is opt-in and disabled by default:
 MEDIA_BINARY_STORAGE_MODE=disabled
 ```
 
-To retain scanned copies:
+Supported persistent modes are:
+
+```text
+filesystem
+s3
+```
+
+Both modes use the same server-generated `tenant UUID / asset UUID` logical key and the same `MediaAsset` TTL/cleanup lifecycle.
+
+### Controlled filesystem storage
 
 ```text
 MEDIA_BINARY_STORAGE_MODE=filesystem
 MEDIA_FILESYSTEM_STORAGE_PATH=/var/lib/api-whatsapp/media
+MEDIA_FILESYSTEM_MIN_FREE_BYTES=1073741824
+MEDIA_FILESYSTEM_MIN_FREE_PERCENT=5
 ```
 
 The configured storage path must be absolute and cannot be the filesystem root. The resolved internal file path must remain under that root; path traversal outside the configured storage boundary is rejected.
@@ -170,7 +183,36 @@ Operators remain responsible for protecting the mounted root with appropriate fi
 
 For multi-replica API deployments the configured path must refer to persistent shared storage visible at the same logical location to every replica that can run upload or retention cleanup. An ephemeral per-container filesystem is not appropriate for retained media.
 
-This backend is deliberately incremental. S3-compatible/object-store support, bucket IAM, object versioning, object-lock/legal-hold features, and independent storage lifecycle rules remain future work.
+Readiness checks filesystem accessibility and configured free-capacity reserves without exposing the path.
+
+### S3-compatible storage
+
+```text
+MEDIA_BINARY_STORAGE_MODE=s3
+MEDIA_S3_ENDPOINT=https://s3.example.internal
+MEDIA_S3_BUCKET=whatsapp-media
+MEDIA_S3_REGION=us-east-1
+MEDIA_S3_ACCESS_KEY_ID=<runtime-secret>
+MEDIA_S3_SECRET_ACCESS_KEY=<runtime-secret>
+MEDIA_S3_SESSION_TOKEN=
+MEDIA_S3_TIMEOUT_MS=30000
+```
+
+The first S3 slice uses path-style requests against an explicit operator-configured endpoint. The endpoint cannot contain credentials, a path prefix, query string, or fragment, and must use HTTPS outside `NODE_ENV=test`.
+
+The application signs S3 requests with AWS Signature Version 4. PUT requests use the complete SHA-256 payload hash: the temporary file is hashed by streaming from disk, then read a second time as a streaming PUT with an explicit `Content-Length`. `UNSIGNED-PAYLOAD` is not used in this foundation.
+
+Object keys are server-generated only:
+
+```text
+<tenant UUID>/<media asset UUID>
+```
+
+The application performs a signed bucket `HEAD` for readiness, signed object `PUT` for retention, and signed object `DELETE` during expiry cleanup. HTTP 404 on DELETE is treated as idempotent success.
+
+Keep the bucket private and scope the runtime principal to the dedicated media bucket/prefix. The application does not need public-read access, does not return object URLs, and does not proxy/download S3 objects for clients.
+
+See `docs/media-s3-storage.md` for the detailed endpoint, signing, failure, permission, readiness, and retention contract.
 
 ## Malware scanning
 
@@ -189,7 +231,7 @@ MEDIA_CLAMAV_PORT=3310
 MEDIA_CLAMAV_TIMEOUT_MS=120000
 ```
 
-The service uses clamd TCP `INSTREAM` with bounded chunks and a bounded response buffer. Scanning is performed on the Multer temporary file before any retained filesystem copy is made.
+The service uses clamd TCP `INSTREAM` with bounded chunks and a bounded response buffer. Scanning is performed on the Multer temporary file before any persistent retained copy is made.
 
 Operational behavior in `clamav` mode:
 
@@ -202,7 +244,7 @@ The malware signature returned by ClamAV is not exposed to API clients or normal
 
 ## Local retention
 
-The same TTL applies to registry metadata and, when filesystem storage is enabled, the retained binary copy:
+The same TTL applies to registry metadata and, when persistent storage is enabled, the retained binary copy:
 
 ```text
 MEDIA_ASSET_TTL_DAYS=30
@@ -220,7 +262,7 @@ MEDIA_ASSET_CLEANUP_INTERVAL_MS=3600000
 
 Accepted interval values are 60,000 through 86,400,000 milliseconds. Each cleanup cycle handles a bounded batch of the oldest expired rows. For each row it:
 
-1. idempotently deletes the retained filesystem path described by `storageMode/storageKey`, if any;
+1. idempotently deletes the retained filesystem path or S3 object described by `storageMode/storageKey`, if any;
 2. deletes the registry row only after storage deletion succeeds.
 
 If storage deletion fails, the row is deliberately retained so a later cleanup can retry and the application does not lose its reference to a potentially retained binary. The database deletion is conditional, so multiple API replicas can race safely on the same expired row.
@@ -229,11 +271,11 @@ Between `expiresAt` and successful cleanup, registry reads can still return deri
 
 ## Failure behavior
 
-Local storage configuration is validated before malware scanning or credential access. Invalid storage mode/root returns HTTP 503.
+Storage configuration is validated before malware scanning or credential access. Invalid storage mode/backend configuration returns HTTP 503.
 
-Once a registry row exists, a filesystem copy failure is recorded as `STORAGE_ERROR` and returns HTTP 503 without a Meta request. If the copy succeeds but `storedAt` cannot be finalized in PostgreSQL, the request returns HTTP 503 and the planned storage key remains in the registry so TTL cleanup can still remove the file.
+Once a registry row exists, a persistent-storage failure is recorded as `STORAGE_ERROR` and returns HTTP 503 without a Meta request. If storage succeeds but `storedAt` cannot be finalized in PostgreSQL, the request returns HTTP 503 and the planned storage key remains in the registry so TTL cleanup can still remove the retained binary.
 
-Retryable Meta/network failures return HTTP 503; permanent Meta rejection returns HTTP 502. Provider-stage failures keep the durably referenced scanned copy until local TTL cleanup when filesystem retention is enabled.
+Retryable Meta/network failures return HTTP 503; permanent Meta rejection returns HTTP 502. Provider-stage failures keep the durably referenced scanned copy until local TTL cleanup when persistent retention is enabled.
 
 The multipart temporary file is removed in `finally` on all service exit paths.
 
@@ -244,12 +286,13 @@ The multipart temporary file is removed in `finally` on all service exit paths.
 - Bounded signature/container inspection runs before storage planning and malware scanning.
 - Storage configuration can fail closed before scanning/credential access.
 - Malware scanning occurs before sender resolution and retained binary creation.
-- The storage key is persisted before filesystem copy so process interruption does not remove the cleanup reference.
+- The storage key is persisted before persistent storage so process interruption does not remove the cleanup reference.
 - Sender resolution remains tenant-scoped.
-- Raw Meta credentials and provider response bodies are never returned to the client.
-- Public registry responses never expose the internal storage key or raw path.
+- S3 endpoint/bucket/credentials are operator-controlled runtime configuration, not client input.
+- Raw Meta credentials, storage credentials, and provider response bodies are never returned to the client.
+- Public registry responses never expose the internal storage key, raw path, bucket, or storage endpoint.
 - Expiration removes the retained binary before its registry metadata.
-- Storage cleanup logs asset/mode only and does not log raw filesystem paths.
+- Storage cleanup logs asset/mode only and does not log raw filesystem paths or S3 object keys.
 
 ## Content validation boundary
 
@@ -285,8 +328,25 @@ HTTP multipart upload
   -> media:read list/detail without storageKey exposure
 ```
 
-The test asserts that the retained file contains the exact uploaded bytes and that registry evidence reports `FILESYSTEM` plus `binaryRetained=true` without exposing a path/key. It also creates an expired stored asset and requires retention cleanup to remove the file before the PostgreSQL row disappears.
+S3-retention coverage requires:
 
-Unit coverage validates storage planning, path confinement, streaming copy, restrictive permissions, idempotent deletion, scan-before-copy ordering, registry-before-copy ordering, storage failure mapping, safe registry projection, and binary-before-row retention cleanup.
+```text
+HTTP multipart upload
+  -> MIME/size + signature validation
+  -> optional ClamAV scan
+  -> tenant sender
+  -> MediaAsset reservation with planned storage key
+  -> signed S3-compatible PUT of exact bytes
+  -> storedAt finalization
+  -> Meta HTTP mock /media
+  -> safe media/operations evidence
+  -> force local expiry
+  -> signed S3 DELETE
+  -> MediaAsset deletion
+```
+
+The S3 gate requires the object PUT to complete before the Meta provider call and verifies exact bytes, content length, signed payload hash, readiness, safe client projection, tenant-scoped retained-byte accounting, and binary-before-row expiry cleanup.
+
+Unit coverage validates storage planning, filesystem confinement, streaming copies/uploads, restrictive filesystem permissions, idempotent deletion, Signature V4 against the published S3 vector, signer-header authority, scan-before-storage ordering, registry-before-storage ordering, storage failure mapping, safe registry projection, and binary-before-row retention cleanup.
 
 Existing integration coverage continues to require cross-tenant 404 behavior, `media:read` authorization, local TTL state, multipart provider authorization/boundary correctness, generated provider filenames, ClamAV clean/malware/unavailable behavior, and the full messaging/load/resilience gate.
