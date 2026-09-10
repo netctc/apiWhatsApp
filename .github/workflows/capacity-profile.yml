@@ -1,0 +1,232 @@
+name: Capacity Profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile_name:
+        description: Bounded label recorded with the capacity artifact
+        required: true
+        default: profile-a
+        type: string
+      messages:
+        description: Total message acceptance attempts
+        required: true
+        default: "5000"
+        type: string
+      concurrency:
+        description: Maximum concurrent HTTP acceptance requests
+        required: true
+        default: "100"
+        type: string
+      target_rps:
+        description: Optional request-start rate; 0 disables pacing
+        required: true
+        default: "0"
+        type: string
+      accept_p95_ms:
+        description: Maximum accepted-request p95 latency in milliseconds
+        required: true
+        default: "3000"
+        type: string
+      accept_p99_ms:
+        description: Maximum accepted-request p99 latency in milliseconds
+        required: true
+        default: "5000"
+        type: string
+      max_error_rate:
+        description: Maximum acceptance error fraction from 0 through 1
+        required: true
+        default: "0"
+        type: string
+      drain_max_ms:
+        description: Maximum post-acceptance drain time in milliseconds
+        required: true
+        default: "300000"
+        type: string
+  push:
+    branches:
+      - test/capacity-profile-a
+    paths:
+      - .github/workflows/capacity-profile.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capacity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/api_whatsapp_capacity?schema=public
+      REDIS_URL: redis://localhost:6379
+      RABBITMQ_URL: amqp://guest:guest@localhost:5672
+      API_KEY_HASH_SECRET: capacity-api-key-hash-secret-0123456789abcdef
+      META_GRAPH_API_VERSION: v99.0
+      META_HTTP_TIMEOUT_MS: "3000"
+      META_APP_SECRET: capacity-meta-app-secret
+      META_WEBHOOK_VERIFY_TOKEN: capacity-verify-token
+      TEST_META_ACCESS_TOKEN: capacity-meta-access-token
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: api_whatsapp_capacity
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d api_whatsapp_capacity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Resolve capacity profile
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PROFILE_NAME: ${{ inputs.profile_name }}
+          INPUT_MESSAGES: ${{ inputs.messages }}
+          INPUT_CONCURRENCY: ${{ inputs.concurrency }}
+          INPUT_TARGET_RPS: ${{ inputs.target_rps }}
+          INPUT_ACCEPT_P95_MS: ${{ inputs.accept_p95_ms }}
+          INPUT_ACCEPT_P99_MS: ${{ inputs.accept_p99_ms }}
+          INPUT_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
+          INPUT_DRAIN_MAX_MS: ${{ inputs.drain_max_ms }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            profile_name="$INPUT_PROFILE_NAME"
+            messages="$INPUT_MESSAGES"
+            concurrency="$INPUT_CONCURRENCY"
+            target_rps="$INPUT_TARGET_RPS"
+            accept_p95_ms="$INPUT_ACCEPT_P95_MS"
+            accept_p99_ms="$INPUT_ACCEPT_P99_MS"
+            max_error_rate="$INPUT_MAX_ERROR_RATE"
+            drain_max_ms="$INPUT_DRAIN_MAX_MS"
+          else
+            profile_name="profile-a"
+            messages="5000"
+            concurrency="100"
+            target_rps="0"
+            accept_p95_ms="3000"
+            accept_p99_ms="5000"
+            max_error_rate="0"
+            drain_max_ms="300000"
+          fi
+
+          case "$profile_name" in
+            *[!A-Za-z0-9._-]*|'') echo "Invalid profile_name" >&2; exit 1 ;;
+          esac
+          case "$messages:$concurrency:$target_rps:$accept_p95_ms:$accept_p99_ms:$max_error_rate:$drain_max_ms" in
+            *[!0-9.:]*|'') echo "Capacity inputs must be numeric" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "CAPACITY_PROFILE_NAME=$profile_name"
+            echo "CAPACITY_MESSAGES=$messages"
+            echo "CAPACITY_CONCURRENCY=$concurrency"
+            echo "CAPACITY_TARGET_RPS=$target_rps"
+            echo "CAPACITY_ACCEPT_P95_MS=$accept_p95_ms"
+            echo "CAPACITY_ACCEPT_P99_MS=$accept_p99_ms"
+            echo "CAPACITY_MAX_ERROR_RATE=$max_error_rate"
+            echo "CAPACITY_DRAIN_MAX_MS=$drain_max_ms"
+          } >> "$GITHUB_ENV"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Apply production migrations
+        run: npm run prisma:deploy
+
+      - name: Run capacity profile
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p capacity-artifacts
+          npm run test:capacity 2>&1 | tee capacity-artifacts/capacity-profile.log
+          grep '^\[capacity-profile\] ' capacity-artifacts/capacity-profile.log \
+            | tail -n 1 \
+            | sed 's/^\[capacity-profile\] //' \
+            > capacity-artifacts/capacity-profile.json
+          test -s capacity-artifacts/capacity-profile.json
+          node -e 'JSON.parse(require("node:fs").readFileSync("capacity-artifacts/capacity-profile.json", "utf8"))'
+
+      - name: Record runner metadata
+        if: always()
+        run: |
+          mkdir -p capacity-artifacts
+          node <<'NODE'
+          const fs = require("node:fs");
+          const os = require("node:os");
+          const metadata = {
+            profile: process.env.CAPACITY_PROFILE_NAME,
+            environmentClass: "github-hosted-baseline",
+            commitSha: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            nodeVersion: process.version,
+            cpuModel: os.cpus()[0]?.model ?? "unknown",
+            cpuCount: os.cpus().length,
+            totalMemoryBytes: os.totalmem(),
+            workload: {
+              messages: Number(process.env.CAPACITY_MESSAGES),
+              concurrency: Number(process.env.CAPACITY_CONCURRENCY),
+              targetRps: Number(process.env.CAPACITY_TARGET_RPS),
+            },
+            gates: {
+              acceptP95Ms: Number(process.env.CAPACITY_ACCEPT_P95_MS),
+              acceptP99Ms: Number(process.env.CAPACITY_ACCEPT_P99_MS),
+              maxErrorRate: Number(process.env.CAPACITY_MAX_ERROR_RATE),
+              drainMaxMs: Number(process.env.CAPACITY_DRAIN_MAX_MS),
+            },
+            note: "GitHub-hosted engineering baseline; not a production throughput certification",
+          };
+          fs.writeFileSync(
+            "capacity-artifacts/capacity-environment.json",
+            `${JSON.stringify(metadata, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Upload capacity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-${{ env.CAPACITY_PROFILE_NAME }}-${{ github.run_id }}
+          path: capacity-artifacts/
+          if-no-files-found: error
+          retention-days: 30
