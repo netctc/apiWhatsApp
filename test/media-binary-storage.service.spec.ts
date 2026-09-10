@@ -31,10 +31,12 @@ describe("MediaBinaryStorageService", () => {
     }
   });
 
-  it("leaves the temporary upload in place when binary retention is disabled", async () => {
+  it("plans no storage and leaves the temporary upload in place when binary retention is disabled", async () => {
     delete process.env.MEDIA_BINARY_STORAGE_MODE;
 
-    await expect(service.stage("/tmp/source", TENANT_ID, ASSET_ID)).resolves.toEqual({
+    const target = service.targetFor(TENANT_ID, ASSET_ID);
+    expect(target).toEqual({ mode: "DISABLED", key: null });
+    await expect(service.stage("/tmp/source", target)).resolves.toEqual({
       mode: "DISABLED",
       key: null,
       filePath: "/tmp/source",
@@ -42,7 +44,7 @@ describe("MediaBinaryStorageService", () => {
     });
   });
 
-  it("streams a file into an internal tenant/asset key with restrictive permissions", async () => {
+  it("plans an internal key before streaming bytes with restrictive permissions", async () => {
     const root = await mkdtemp(join(tmpdir(), "api-whatsapp-media-storage-"));
     const sourceDir = await mkdtemp(join(tmpdir(), "api-whatsapp-media-source-"));
     const sourcePath = join(sourceDir, "client-name.jpg");
@@ -56,7 +58,13 @@ describe("MediaBinaryStorageService", () => {
     process.env.MEDIA_FILESYSTEM_STORAGE_PATH = root;
 
     try {
-      const staged = await service.stage(sourcePath, TENANT_ID, ASSET_ID);
+      const target = service.targetFor(TENANT_ID, ASSET_ID);
+      expect(target).toEqual({
+        mode: "FILESYSTEM",
+        key: `${TENANT_ID}/${ASSET_ID}`,
+      });
+
+      const staged = await service.stage(sourcePath, target);
       expect(staged.mode).toBe("FILESYSTEM");
       expect(staged.key).toBe(`${TENANT_ID}/${ASSET_ID}`);
       expect(staged.filePath).toBe(join(root, TENANT_ID, ASSET_ID));
@@ -74,30 +82,27 @@ describe("MediaBinaryStorageService", () => {
     }
   });
 
-  it("fails closed when filesystem mode has no absolute storage root", async () => {
+  it("fails closed while planning when filesystem mode has no absolute storage root", () => {
     process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
     delete process.env.MEDIA_FILESYSTEM_STORAGE_PATH;
 
-    await expect(service.stage("/tmp/source", TENANT_ID, ASSET_ID)).rejects.toBeInstanceOf(
-      MediaBinaryStorageError,
-    );
+    expect(() => service.targetFor(TENANT_ID, ASSET_ID)).toThrow(MediaBinaryStorageError);
 
     process.env.MEDIA_FILESYSTEM_STORAGE_PATH = "relative/media";
-    await expect(service.stage("/tmp/source", TENANT_ID, ASSET_ID)).rejects.toMatchObject({
-      message: "MEDIA_FILESYSTEM_STORAGE_PATH must be an absolute path",
-    });
+    expect(() => service.targetFor(TENANT_ID, ASSET_ID)).toThrow(
+      "MEDIA_FILESYSTEM_STORAGE_PATH must be an absolute path",
+    );
   });
 
-  it("rejects storage keys that resolve outside the configured root", async () => {
+  it("rejects planned keys that resolve outside the configured root", async () => {
     const root = await mkdtemp(join(tmpdir(), "api-whatsapp-media-storage-"));
     process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
     process.env.MEDIA_FILESYSTEM_STORAGE_PATH = root;
 
     try {
-      await expect(service.stage("/tmp/source", "tenant", "../../escape")).rejects.toMatchObject({
-        name: "MediaBinaryStorageError",
-        message: "Media storage key resolved outside the configured root",
-      });
+      expect(() => service.targetFor("tenant", "../../escape")).toThrow(
+        "Media storage key resolved outside the configured root",
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
