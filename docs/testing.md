@@ -238,6 +238,25 @@ A fresh API instance is then started against the same database with the normal f
 
 The final state requires one outbox publication attempt, `SUBMITTED`, one provider message ID, and exactly one Meta call. This proves accepted work survives the lifetime of the API process even when the process stops in the post-commit/pre-publish window.
 
+## Stale worker processing lease recovery
+
+The worker-recovery gate reproduces the durable state left by a worker interruption after a message has been claimed but before its RabbitMQ delivery is acknowledged: the message is persisted as `PROCESSING`, has an active `processingLeaseUntil`, and the corresponding queue job is available for redelivery.
+
+The test first lets the normal outbox publisher place the job on real RabbitMQ without starting a worker. It then records a simulated crashed-worker claim in PostgreSQL with `attemptCount=1` and a bounded active lease before starting a replacement worker.
+
+The replacement worker must consume the redelivered job but fail closed while the previous processing lease is still active. It schedules the same logical job through the configured retry queue and must not call Meta. The retry delay is intentionally longer than the simulated stale lease, so the next delivery occurs only after the lease is reclaimable.
+
+The suite requires:
+
+- the first replacement-worker delivery to leave the message at `PROCESSING` with `attemptCount=1`;
+- the real RabbitMQ retry queue to contain the deferred job while the stale lease is active;
+- zero Meta provider requests before lease expiry;
+- the later delivery to reclaim the same logical message and increment `attemptCount` to 2;
+- the recovered message to reach `SUBMITTED` with the processing lease cleared;
+- exactly one Meta provider request across the simulated crash and recovery path.
+
+This CI scenario validates the persisted crash-recovery invariant without terminating a Jest-owned process mid-request. Deployment-level chaos testing should still include a real container or process kill to validate supervisor and RabbitMQ connection behavior around the same durable lease contract.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -279,10 +298,11 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, Redis rate-limiter recovery, and recovery across the API post-commit/pre-publish restart window. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, Redis rate-limiter recovery, recovery across the API post-commit/pre-publish restart window, and the stale processing-lease recovery invariant. The remaining CI resilience scenario is:
 
-- worker termination while a processing lease is active;
 - webhook burst while campaigns are running.
+
+A literal worker/container kill should additionally be exercised in deployment-level chaos testing, outside the in-process Jest harness.
 
 ## Local execution example
 
