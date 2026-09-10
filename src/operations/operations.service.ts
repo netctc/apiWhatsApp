@@ -17,6 +17,16 @@ interface OutboxBacklogRow {
   oldestPendingAgeSeconds: number | null;
 }
 
+interface MediaAssetOperationsRow {
+  total: number;
+  providerUploaded: number;
+  failed: number;
+  expired: number;
+  retainedBinaries: number;
+  retainedBytes: number;
+  expiringWithin24Hours: number;
+}
+
 export interface OperationsSnapshot {
   messages: {
     total: number;
@@ -35,6 +45,15 @@ export interface OperationsSnapshot {
     withErrors: number;
     oldestPendingAgeSeconds: number | null;
   };
+  mediaAssets: {
+    total: number;
+    providerUploaded: number;
+    failed: number;
+    expired: number;
+    retainedBinaries: number;
+    retainedBytes: number;
+    expiringWithin24Hours: number;
+  };
   generatedAt: string;
 }
 
@@ -43,7 +62,14 @@ export class OperationsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async snapshot(tenantId: string): Promise<OperationsSnapshot> {
-    const [messageRows, trafficRows, campaignRows, recipientRows, outboxRows] = await Promise.all([
+    const [
+      messageRows,
+      trafficRows,
+      campaignRows,
+      recipientRows,
+      outboxRows,
+      mediaAssetRows,
+    ] = await Promise.all([
       this.prisma.message.groupBy({
         by: ["status"],
         where: { tenantId },
@@ -90,6 +116,32 @@ export class OperationsService {
           AND o."eventType" = 'message.outbound.requested'
           AND m."tenantId" = ${tenantId}::uuid
       `),
+      this.prisma.$queryRaw<MediaAssetOperationsRow[]>(Prisma.sql`
+        SELECT
+          COUNT(*)::int AS "total",
+          COUNT(*) FILTER (WHERE a."providerUploadedAt" IS NOT NULL)::int AS "providerUploaded",
+          COUNT(*) FILTER (WHERE a."failedAt" IS NOT NULL)::int AS "failed",
+          COUNT(*) FILTER (
+            WHERE a."expiresAt" IS NOT NULL
+              AND a."expiresAt" <= NOW()
+          )::int AS "expired",
+          COUNT(*) FILTER (
+            WHERE a."storageMode" = 'FILESYSTEM'
+              AND a."storageKey" IS NOT NULL
+              AND a."storedAt" IS NOT NULL
+          )::int AS "retainedBinaries",
+          COALESCE(SUM(a."size") FILTER (
+            WHERE a."storageMode" = 'FILESYSTEM'
+              AND a."storageKey" IS NOT NULL
+              AND a."storedAt" IS NOT NULL
+          ), 0)::double precision AS "retainedBytes",
+          COUNT(*) FILTER (
+            WHERE a."expiresAt" > NOW()
+              AND a."expiresAt" <= NOW() + INTERVAL '24 hours'
+          )::int AS "expiringWithin24Hours"
+        FROM "MediaAsset" AS a
+        WHERE a."tenantId" = ${tenantId}::uuid
+      `),
     ]);
 
     const messagesByStatus = this.zeroedRecord(MessageStatus);
@@ -119,6 +171,15 @@ export class OperationsService {
       withErrors: 0,
       oldestPendingAgeSeconds: null,
     };
+    const mediaAssets = mediaAssetRows[0] ?? {
+      total: 0,
+      providerUploaded: 0,
+      failed: 0,
+      expired: 0,
+      retainedBinaries: 0,
+      retainedBytes: 0,
+      expiringWithin24Hours: 0,
+    };
 
     return {
       messages: {
@@ -132,6 +193,7 @@ export class OperationsService {
         recipientsByStatus,
       },
       outbox,
+      mediaAssets,
       generatedAt: new Date().toISOString(),
     };
   }
