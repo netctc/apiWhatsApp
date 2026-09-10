@@ -107,6 +107,7 @@ model Tenant {
   inboxAgents       InboxAgent[]
   conversations     Conversation[]
   conversationNotes ConversationNote[]
+  mediaAssets       MediaAsset[]
 }
 
 model ApiKey {
@@ -164,6 +165,7 @@ model WhatsAppPhoneNumber {
   messages               Message[]
   campaigns              Campaign[]
   conversations          Conversation[]
+  mediaAssets            MediaAsset[]
 
   @@index([tenantId, active, isDefault])
   @@index([tenantId, wabaId, active])
@@ -368,6 +370,30 @@ model ConversationNote {
   createdByApiKey   ApiKey?       @relation("ConversationNoteActor", fields: [createdByApiKeyId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, conversationId, createdAt])
+}
+
+model MediaAsset {
+  id                 String              @id @default(uuid()) @db.Uuid
+  tenantId           String              @db.Uuid
+  senderId           String              @db.Uuid
+  providerMediaId    String?             @unique
+  category           String
+  mimeType           String
+  size               Int
+  scanMode           String
+  scanStatus         String
+  providerUploadedAt DateTime?
+  expiresAt          DateTime?
+  failedAt           DateTime?
+  failureCode        String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sender             WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, expiresAt, createdAt])
+  @@index([tenantId, senderId, createdAt])
 }
 
 model Message {
