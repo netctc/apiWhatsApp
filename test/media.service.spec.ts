@@ -2,7 +2,14 @@ import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { jest } from "@jest/globals";
-import { BadRequestException, ServiceUnavailableException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ServiceUnavailableException,
+  UnprocessableEntityException,
+} from "@nestjs/common";
+import {
+  MediaMalwareScanError,
+} from "../src/media/media-malware-scanner.service.js";
 import { MediaService } from "../src/media/media.service.js";
 import { MetaApiError } from "../src/meta/meta-api.error.js";
 
@@ -23,9 +30,11 @@ async function expectDeleted(path: string): Promise<void> {
 describe("MediaService", () => {
   const resolveForTenant = jest.fn();
   const uploadMedia = jest.fn();
+  const scan = jest.fn();
   const service = new MediaService(
     { resolveForTenant } as never,
     { uploadMedia } as never,
+    { scan } as never,
   );
 
   beforeEach(() => {
@@ -36,9 +45,10 @@ describe("MediaService", () => {
       accessToken: "provider-token",
     });
     uploadMedia.mockResolvedValue({ mediaId: "media-123" });
+    scan.mockResolvedValue(undefined);
   });
 
-  it("uploads through the tenant-scoped sender and removes the temporary file", async () => {
+  it("scans before tenant credential resolution, uploads, and removes the temporary file", async () => {
     const temp = await createTempFile();
     try {
       const result = await service.upload(TENANT_ID, { senderId: SENDER_ID }, {
@@ -47,6 +57,8 @@ describe("MediaService", () => {
         size: temp.size,
       });
 
+      expect(scan).toHaveBeenCalledWith(temp.filePath);
+      expect(scan.mock.invocationCallOrder[0]).toBeLessThan(resolveForTenant.mock.invocationCallOrder[0]);
       expect(resolveForTenant).toHaveBeenCalledWith(TENANT_ID, SENDER_ID);
       expect(uploadMedia).toHaveBeenCalledWith(
         {
@@ -86,6 +98,54 @@ describe("MediaService", () => {
         }),
       });
 
+      expect(scan).not.toHaveBeenCalled();
+      expect(resolveForTenant).not.toHaveBeenCalled();
+      expect(uploadMedia).not.toHaveBeenCalled();
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malware before sender/provider access and removes the temporary file", async () => {
+    scan.mockRejectedValue(
+      new MediaMalwareScanError("MALWARE_DETECTED", "Eicar-Test-Signature FOUND"),
+    );
+    const temp = await createTempFile();
+
+    try {
+      await expect(
+        service.upload(TENANT_ID, { senderId: SENDER_ID }, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toBeInstanceOf(UnprocessableEntityException);
+
+      expect(scan).toHaveBeenCalledWith(temp.filePath);
+      expect(resolveForTenant).not.toHaveBeenCalled();
+      expect(uploadMedia).not.toHaveBeenCalled();
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed before sender/provider access when security scanning is unavailable", async () => {
+    scan.mockRejectedValue(
+      new MediaMalwareScanError("SCANNER_UNAVAILABLE", "connection refused"),
+    );
+    const temp = await createTempFile();
+
+    try {
+      await expect(
+        service.upload(TENANT_ID, { senderId: SENDER_ID }, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
@@ -117,7 +177,7 @@ describe("MediaService", () => {
     }
   });
 
-  it("removes rejected files before any sender/provider call", async () => {
+  it("removes rejected files before any scanner/sender/provider call", async () => {
     const temp = await createTempFile(Buffer.from("zip"));
     try {
       await expect(
@@ -128,6 +188,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
@@ -147,6 +208,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
@@ -165,6 +227,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
+      expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
