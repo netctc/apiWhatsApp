@@ -43,11 +43,6 @@ on:
         required: true
         default: "300000"
         type: string
-  push:
-    branches:
-      - test/capacity-profile-a
-    paths:
-      - .github/workflows/capacity-profile.yml
 
 permissions:
   contents: read
@@ -115,7 +110,6 @@ jobs:
 
       - name: Resolve capacity profile
         env:
-          EVENT_NAME: ${{ github.event_name }}
           INPUT_PROFILE_NAME: ${{ inputs.profile_name }}
           INPUT_MESSAGES: ${{ inputs.messages }}
           INPUT_CONCURRENCY: ${{ inputs.concurrency }}
@@ -125,42 +119,22 @@ jobs:
           INPUT_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
           INPUT_DRAIN_MAX_MS: ${{ inputs.drain_max_ms }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            profile_name="$INPUT_PROFILE_NAME"
-            messages="$INPUT_MESSAGES"
-            concurrency="$INPUT_CONCURRENCY"
-            target_rps="$INPUT_TARGET_RPS"
-            accept_p95_ms="$INPUT_ACCEPT_P95_MS"
-            accept_p99_ms="$INPUT_ACCEPT_P99_MS"
-            max_error_rate="$INPUT_MAX_ERROR_RATE"
-            drain_max_ms="$INPUT_DRAIN_MAX_MS"
-          else
-            profile_name="profile-a"
-            messages="5000"
-            concurrency="100"
-            target_rps="0"
-            accept_p95_ms="3000"
-            accept_p99_ms="5000"
-            max_error_rate="0"
-            drain_max_ms="300000"
-          fi
-
-          case "$profile_name" in
+          case "$INPUT_PROFILE_NAME" in
             *[!A-Za-z0-9._-]*|'') echo "Invalid profile_name" >&2; exit 1 ;;
           esac
-          case "$messages:$concurrency:$target_rps:$accept_p95_ms:$accept_p99_ms:$max_error_rate:$drain_max_ms" in
+          case "$INPUT_MESSAGES:$INPUT_CONCURRENCY:$INPUT_TARGET_RPS:$INPUT_ACCEPT_P95_MS:$INPUT_ACCEPT_P99_MS:$INPUT_MAX_ERROR_RATE:$INPUT_DRAIN_MAX_MS" in
             *[!0-9.:]*|'') echo "Capacity inputs must be numeric" >&2; exit 1 ;;
           esac
 
           {
-            echo "CAPACITY_PROFILE_NAME=$profile_name"
-            echo "CAPACITY_MESSAGES=$messages"
-            echo "CAPACITY_CONCURRENCY=$concurrency"
-            echo "CAPACITY_TARGET_RPS=$target_rps"
-            echo "CAPACITY_ACCEPT_P95_MS=$accept_p95_ms"
-            echo "CAPACITY_ACCEPT_P99_MS=$accept_p99_ms"
-            echo "CAPACITY_MAX_ERROR_RATE=$max_error_rate"
-            echo "CAPACITY_DRAIN_MAX_MS=$drain_max_ms"
+            echo "CAPACITY_PROFILE_NAME=$INPUT_PROFILE_NAME"
+            echo "CAPACITY_MESSAGES=$INPUT_MESSAGES"
+            echo "CAPACITY_CONCURRENCY=$INPUT_CONCURRENCY"
+            echo "CAPACITY_TARGET_RPS=$INPUT_TARGET_RPS"
+            echo "CAPACITY_ACCEPT_P95_MS=$INPUT_ACCEPT_P95_MS"
+            echo "CAPACITY_ACCEPT_P99_MS=$INPUT_ACCEPT_P99_MS"
+            echo "CAPACITY_MAX_ERROR_RATE=$INPUT_MAX_ERROR_RATE"
+            echo "CAPACITY_DRAIN_MAX_MS=$INPUT_DRAIN_MAX_MS"
           } >> "$GITHUB_ENV"
 
       - name: Install locked dependencies
