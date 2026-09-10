@@ -1,0 +1,137 @@
+# Meta media upload
+
+Release `0.17.0` adds a controlled tenant-scoped upload endpoint for obtaining WhatsApp Cloud API media IDs.
+
+## Endpoint
+
+```text
+POST /api/v1/media
+Content-Type: multipart/form-data
+X-API-Key: <tenant API key>
+```
+
+Required scope:
+
+```text
+media:write
+```
+
+Multipart fields:
+
+```text
+file       required, exactly one file
+senderId   optional tenant-scoped WhatsApp sender UUID
+```
+
+No other multipart text fields are accepted. Tenant identity always comes from the authenticated API key and cannot be supplied in the form body.
+
+If `senderId` is omitted, the tenant's active default sender is used.
+
+## Processing path
+
+```text
+authenticate + authorize
+  -> Multer disk-backed temporary file
+  -> validate allowed multipart fields
+  -> validate declared MIME + size policy
+  -> resolve sender inside authenticated tenant
+  -> resolve sender credential reference
+  -> POST /{phone-number-id}/media to Meta
+  -> return mediaId + safe technical metadata
+  -> delete temporary file in finally
+```
+
+The service does not keep the binary after the provider request and does not create a media asset database row in this release.
+
+## Supported upload policy
+
+Limits are enforced in decimal MB so the application does not exceed the published provider limits because of MiB/MB ambiguity.
+
+| Category | MIME types | Max size |
+| --- | --- | ---: |
+| Image | `image/jpeg`, `image/png` | 5 MB |
+| Audio | `audio/aac`, `audio/mp4`, `audio/mpeg`, `audio/amr`, `audio/ogg` | 16 MB |
+| Video | `video/mp4`, `video/3gpp` | 16 MB |
+| Document | `text/plain`, PDF, Word, Excel, PowerPoint legacy/OOXML MIME types | 100 MB |
+
+The multipart parser also applies a 100 MB global file limit and accepts only one file.
+
+Server-side provider filenames are generated from the approved MIME policy (`upload.jpg`, `upload.pdf`, etc.). The client-supplied original filename is not forwarded to Meta.
+
+## Response
+
+Successful upload returns only safe technical metadata:
+
+```json
+{
+  "mediaId": "<meta-media-id>",
+  "senderId": "<internal-tenant-sender-id>",
+  "category": "IMAGE",
+  "mimeType": "image/jpeg",
+  "size": 48123
+}
+```
+
+The resulting `mediaId` can be passed to the existing message endpoint, for example:
+
+```json
+{
+  "to": "+96170123456",
+  "type": "IMAGE",
+  "payload": {
+    "id": "<meta-media-id>",
+    "caption": "Delivery photo"
+  }
+}
+```
+
+## Security boundaries
+
+- Upload requires `media:write`; message sending remains a separate `messages:write` capability.
+- `senderId` is resolved using the authenticated tenant before any provider credential is exposed to the upload client.
+- The global/legacy worker sender resolver is not used for client-controlled interactive upload.
+- Raw Meta access tokens are never returned and are still resolved from configured credential references.
+- Raw Meta provider response bodies are not returned on upload failure.
+- Unexpected multipart fields fail closed.
+- Temporary files are deleted in `finally` after success, policy rejection, sender/provider failure, or other service-level errors.
+- Provider logs contain only safe technical sender/status/code/retryability data and never the token, file bytes, original filename, or provider response body.
+
+## Temporary storage
+
+Uploads are written to the operating system temporary directory using generated filenames rather than buffered in Node.js memory. This prevents a permitted large document upload from consuming an equivalent application heap buffer.
+
+Operators must ensure the runtime has sufficient ephemeral disk capacity and normal OS/container isolation for the temporary directory. The file exists only for the duration of the synchronous provider upload path.
+
+## Timeouts and failure mapping
+
+Media upload has a timeout independent of normal message/template calls:
+
+```text
+META_MEDIA_UPLOAD_TIMEOUT_MS=120000
+```
+
+Accepted configuration range is 1,000 to 600,000 milliseconds.
+
+Retryable Meta/network failures return HTTP 503 with a generic message. Permanent Meta rejection returns HTTP 502 with a generic message. Provider payload details are deliberately not exposed to API consumers.
+
+## Content validation boundary
+
+This release validates the multipart-declared MIME type and file size. It does **not** yet inspect magic bytes, transcode media, verify codecs, perform malware scanning, or run document content inspection.
+
+Meta still validates the provider upload. For deployments that accept untrusted end-user files, a later hardening slice should add controlled object storage/quarantine, MIME sniffing, malware/content scanning, retention/expiry policy, and only then provider upload.
+
+## Integration coverage
+
+The real-infrastructure CI suite uploads a small JPEG through the live Nest endpoint and verifies:
+
+```text
+HTTP multipart request
+  -> authenticated media:write scope
+  -> tenant sender
+  -> disk-backed temporary file
+  -> native Node FormData
+  -> Meta HTTP mock /media endpoint
+  -> returned mediaId
+```
+
+The test also verifies the provider Authorization header, multipart boundary, `messaging_product=whatsapp`, the generated provider filename, and that the original client filename is not forwarded.
