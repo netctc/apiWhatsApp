@@ -76,21 +76,23 @@ enum CampaignRecipientStatus {
 }
 
 model Tenant {
-  id           String                @id @default(uuid()) @db.Uuid
-  name         String
-  slug         String                @unique
-  status       TenantStatus          @default(ACTIVE)
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
-  apiKeys      ApiKey[]
-  contacts     Contact[]
-  messages     Message[]
-  consents     ContactConsentEvent[]
-  phoneNumbers WhatsAppPhoneNumber[]
-  templates    MessageTemplate[]
-  campaigns    Campaign[]
-  segments     ContactSegment[]
-  auditLogs    AuditLog[]
+  id                      String                  @id @default(uuid()) @db.Uuid
+  name                    String
+  slug                    String                  @unique
+  status                  TenantStatus            @default(ACTIVE)
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
+  apiKeys                 ApiKey[]
+  contacts                Contact[]
+  messages                Message[]
+  consents                ContactConsentEvent[]
+  phoneNumbers            WhatsAppPhoneNumber[]
+  templates               MessageTemplate[]
+  campaigns               Campaign[]
+  segments                ContactSegment[]
+  auditLogs               AuditLog[]
+  clientWebhookEndpoints  ClientWebhookEndpoint[]
+  clientWebhookDeliveries ClientWebhookDelivery[]
 }
 
 model ApiKey {
@@ -374,4 +376,48 @@ model OutboxEvent {
 
   @@index([publishedAt, nextAttemptAt, processingLeaseUntil, createdAt])
   @@index([aggregateType, aggregateId])
+}
+
+model ClientWebhookEndpoint {
+  id               String                  @id @default(uuid()) @db.Uuid
+  tenantId         String                  @db.Uuid
+  name             String
+  url              String
+  secretCiphertext String
+  secretIv         String
+  secretTag        String
+  events           String[]
+  active           Boolean                 @default(true)
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  tenant           Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveries       ClientWebhookDelivery[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, active, updatedAt])
+}
+
+model ClientWebhookDelivery {
+  id                   String                @id @default(uuid()) @db.Uuid
+  tenantId             String                @db.Uuid
+  endpointId           String                @db.Uuid
+  eventType            String
+  sourceEventKey       String
+  payload              Json
+  attemptCount         Int                   @default(0)
+  nextAttemptAt        DateTime              @default(now())
+  processingLeaseUntil DateTime?
+  deliveredAt          DateTime?
+  failedAt             DateTime?
+  responseStatus       Int?
+  lastError            String?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  tenant               Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  endpoint             ClientWebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, sourceEventKey])
+  @@index([deliveredAt, failedAt, nextAttemptAt, processingLeaseUntil, createdAt])
+  @@index([tenantId, createdAt])
+  @@index([endpointId, createdAt])
 }
