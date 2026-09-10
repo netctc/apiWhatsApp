@@ -1,8 +1,11 @@
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { constants, createReadStream, createWriteStream } from "node:fs";
+import { access, mkdir, rm, stat, statfs } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Injectable } from "@nestjs/common";
+
+const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_MIN_FREE_PERCENT = 10;
 
 export type MediaBinaryStorageMode = "DISABLED" | "FILESYSTEM";
 
@@ -15,6 +18,27 @@ export interface StagedMediaBinary extends MediaBinaryStorageTarget {
   filePath: string;
   storedAt: Date | null;
 }
+
+export type MediaBinaryStorageDiagnostics =
+  | {
+      status: "up";
+      mode: "disabled";
+    }
+  | {
+      status: "up" | "down";
+      mode: "filesystem";
+      totalBytes?: number;
+      freeBytes?: number;
+      freePercent?: number;
+      minimumFreeBytes: number;
+      minimumFreePercent: number;
+      error?: "low_capacity" | "unavailable";
+    }
+  | {
+      status: "down";
+      mode: "filesystem" | "invalid";
+      error: "not_configured";
+    };
 
 export class MediaBinaryStorageError extends Error {
   constructor(message: string) {
@@ -89,6 +113,93 @@ export class MediaBinaryStorageService {
     });
   }
 
+  async diagnostics(): Promise<MediaBinaryStorageDiagnostics> {
+    let mode: MediaBinaryStorageMode;
+    try {
+      mode = this.mode();
+    } catch {
+      return {
+        status: "down",
+        mode: "invalid",
+        error: "not_configured",
+      };
+    }
+
+    if (mode === "DISABLED") {
+      return {
+        status: "up",
+        mode: "disabled",
+      };
+    }
+
+    let root: string;
+    try {
+      root = this.filesystemRoot();
+    } catch {
+      return {
+        status: "down",
+        mode: "filesystem",
+        error: "not_configured",
+      };
+    }
+
+    let minimumFreeBytes: number;
+    let minimumFreePercent: number;
+    try {
+      minimumFreeBytes = this.readMinimumFreeBytes();
+      minimumFreePercent = this.readMinimumFreePercent();
+    } catch {
+      return {
+        status: "down",
+        mode: "filesystem",
+        error: "not_configured",
+      };
+    }
+
+    try {
+      const rootStat = await stat(root);
+      if (!rootStat.isDirectory()) {
+        throw new Error("storage root is not a directory");
+      }
+      await access(root, constants.R_OK | constants.W_OK);
+      const capacity = await statfs(root);
+      const totalBytes = capacity.blocks * capacity.bsize;
+      const freeBytes = capacity.bavail * capacity.bsize;
+      const freePercent = totalBytes > 0 ? (freeBytes / totalBytes) * 100 : 0;
+
+      if (freeBytes < minimumFreeBytes || freePercent < minimumFreePercent) {
+        return {
+          status: "down",
+          mode: "filesystem",
+          error: "low_capacity",
+          totalBytes,
+          freeBytes,
+          freePercent,
+          minimumFreeBytes,
+          minimumFreePercent,
+        };
+      }
+
+      return {
+        status: "up",
+        mode: "filesystem",
+        totalBytes,
+        freeBytes,
+        freePercent,
+        minimumFreeBytes,
+        minimumFreePercent,
+      };
+    } catch {
+      return {
+        status: "down",
+        mode: "filesystem",
+        error: "unavailable",
+        minimumFreeBytes,
+        minimumFreePercent,
+      };
+    }
+  }
+
   private mode(): MediaBinaryStorageMode {
     const value = (process.env.MEDIA_BINARY_STORAGE_MODE ?? "disabled").trim().toLowerCase();
     if (value === "disabled") {
@@ -116,6 +227,34 @@ export class MediaBinaryStorageService {
       throw new MediaBinaryStorageError("MEDIA_FILESYSTEM_STORAGE_PATH cannot be the filesystem root");
     }
     return root;
+  }
+
+  private readMinimumFreeBytes(): number {
+    const raw = process.env.MEDIA_FILESYSTEM_MIN_FREE_BYTES;
+    if (raw === undefined || raw.trim() === "") {
+      return DEFAULT_MIN_FREE_BYTES;
+    }
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new MediaBinaryStorageError(
+        "MEDIA_FILESYSTEM_MIN_FREE_BYTES must be a non-negative safe integer",
+      );
+    }
+    return value;
+  }
+
+  private readMinimumFreePercent(): number {
+    const raw = process.env.MEDIA_FILESYSTEM_MIN_FREE_PERCENT;
+    if (raw === undefined || raw.trim() === "") {
+      return DEFAULT_MIN_FREE_PERCENT;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      throw new MediaBinaryStorageError(
+        "MEDIA_FILESYSTEM_MIN_FREE_PERCENT must be between 0 and 100",
+      );
+    }
+    return value;
   }
 
   private pathForKey(root: string, key: string): string {
