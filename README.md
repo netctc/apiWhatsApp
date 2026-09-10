@@ -18,7 +18,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - WABA template synchronization and lifecycle tracking
 - Local `APPROVED` template enforcement before outbound creation
 - Outbound text plus image/video/audio/document media messaging
-- Tenant-scoped direct media upload with bounded disk-backed multipart handling and MIME/content signature validation
+- Tenant-scoped direct media upload with bounded disk-backed multipart handling, MIME/content signature validation, and optional fail-closed ClamAV malware scanning
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues, retry queues, DLQs, and traffic-class prefetch
 - Priority-aware Redis sender capacity reservation
@@ -45,7 +45,8 @@ flowchart LR
     Agent[Agent / Helpdesk Client] --> API
     API --> DB[(PostgreSQL)]
     API --> Temp[Ephemeral media file]
-    Temp --> Meta[Meta Cloud API]
+    Temp --> Scan[Optional ClamAV scan]
+    Scan --> Meta[Meta Cloud API]
     DB --> Inbox[Conversation Read Model]
     DB --> Outbox[Transactional Outbox]
     Outbox --> Router[Traffic Router]
@@ -67,7 +68,7 @@ flowchart LR
 
 Outbound message requests accept and persist work quickly; WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
 
-Media upload is intentionally different: it is a bounded synchronous provider operation that writes one temporary file to disk, validates declared MIME/size plus a bounded content signature/container prefix, uploads it directly to Meta, returns the resulting media ID, and removes the temporary file in `finally`.
+Media upload is intentionally different: it is a bounded synchronous provider operation that writes one temporary file to disk, validates declared MIME/size plus a bounded content signature/container prefix, optionally streams the complete file through a fail-closed ClamAV gate, uploads it directly to Meta, returns the resulting media ID, and removes the temporary file in `finally`.
 
 The agent inbox is an operational layer over the authoritative `Message` store. Conversation rows keep assignment/state/activity data; message payloads and provider lifecycle remain on `Message`.
 
@@ -195,7 +196,7 @@ file       required
 senderId   optional tenant-scoped sender UUID
 ```
 
-The endpoint writes one upload to OS/container temporary storage rather than buffering the full file in the Node.js heap. It validates the multipart field set, declared MIME type and size, cross-checks a bounded file signature/container prefix, resolves the sender inside the authenticated tenant, uploads to Meta with that sender's credential, returns the provider media ID, and deletes the temporary file on every service exit path.
+The endpoint writes one upload to OS/container temporary storage rather than buffering the full file in the Node.js heap. It validates the multipart field set, declared MIME type and size, cross-checks a bounded file signature/container prefix, optionally performs a complete-file ClamAV `INSTREAM` scan, resolves the sender inside the authenticated tenant only after scanning succeeds, uploads to Meta with that sender's credential, returns the provider media ID, and deletes the temporary file on every service exit path.
 
 Current local limits are intentionally at or below the provider limits:
 
@@ -218,7 +219,7 @@ Example response:
 }
 ```
 
-The service does not persist uploaded binaries or an asset registry in the current media-upload foundation. It validates declared MIME/size and reads at most an 8 KiB prefix for signature/container checks before credentials/provider access. This is not malware scanning, codec validation, or complete Office/document parsing; controlled quarantine/object storage, malware/content scanning, and retention policy remain future hardening. See `docs/media-upload.md`.
+The service does not persist uploaded binaries or an asset registry in the current media-upload foundation. It validates declared MIME/size and reads at most an 8 KiB prefix for signature/container checks before credentials/provider access. Optional ClamAV mode then scans the full file as a bounded stream and fails closed on an unavailable or untrustworthy scanner result. Codec validation, complete Office/document parsing, controlled quarantine/object storage, an internal asset registry, and retention/expiry policy remain future hardening. See `docs/media-upload.md`.
 
 ## Senders and templates
 
@@ -410,7 +411,7 @@ Core coverage proves:
 
 ```text
 text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mock -> SUBMITTED
-multipart media upload -> temporary disk file -> MIME/size + signature check -> tenant sender -> Meta mock /media -> mediaId
+multipart media upload -> temporary disk file -> MIME/size + signature check -> optional ClamAV scan -> tenant sender -> Meta mock /media -> mediaId
 ```
 
 Inbox coverage proves:
@@ -480,6 +481,10 @@ META_APP_SECRET
 META_WEBHOOK_VERIFY_TOKEN
 META_HTTP_TIMEOUT_MS
 META_MEDIA_UPLOAD_TIMEOUT_MS
+MEDIA_MALWARE_SCAN_MODE
+MEDIA_CLAMAV_HOST
+MEDIA_CLAMAV_PORT
+MEDIA_CLAMAV_TIMEOUT_MS
 OUTBOUND_RETRY_DELAYS_MS
 DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND
 CAMPAIGN_MAX_RECIPIENTS
@@ -498,7 +503,7 @@ Never commit production credentials or access tokens.
 - production capacity / soak / new incident-driven failure-injection test expansion
 - OpenTelemetry span export and tracing-backend integration
 - provider-backed secret stores beyond environment references
-- controlled media quarantine/object storage, malware/content scanning and retention
+- controlled media quarantine/object storage, internal asset registry, retention/expiry and deeper content validation
 - realtime inbox delivery (SSE/WebSocket), teams/skills, routing policies, SLA/escalation and human-agent session/SSO integration
 - optional inbox frontend application
 
