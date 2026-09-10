@@ -2,7 +2,7 @@ const MEDIA_MESSAGE_TYPES = ["IMAGE", "VIDEO", "AUDIO", "DOCUMENT"] as const;
 
 export type MediaMessageType = (typeof MEDIA_MESSAGE_TYPES)[number];
 
-export interface NormalizedMediaPayload {
+export interface NormalizedMediaPayload extends Record<string, unknown> {
   id?: string;
   link?: string;
   caption?: string;
