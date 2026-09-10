@@ -31,14 +31,17 @@ export class MediaService {
     private readonly metaMedia: MetaMediaClient,
   ) {}
 
-  async upload(tenantId: string, senderId: string | undefined, file: StoredMediaUploadFile | undefined) {
+  async upload(
+    tenantId: string,
+    fields: Record<string, unknown>,
+    file: StoredMediaUploadFile | undefined,
+  ) {
     try {
       if (!file?.path) {
         throw new BadRequestException("Multipart field 'file' is required");
       }
-      if (senderId && !isUUID(senderId, "4")) {
-        throw new BadRequestException("senderId must be a UUID v4 when provided");
-      }
+
+      const senderId = this.readSenderId(fields);
 
       let policy;
       try {
@@ -92,5 +95,24 @@ export class MediaService {
         await rm(file.path, { force: true }).catch(() => undefined);
       }
     }
+  }
+
+  private readSenderId(fields: Record<string, unknown>): string | undefined {
+    const keys = Object.keys(fields);
+    const unsupported = keys.filter((key) => key !== "senderId");
+    if (unsupported.length > 0) {
+      throw new BadRequestException(
+        `Unsupported multipart field${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}`,
+      );
+    }
+
+    const senderId = fields.senderId;
+    if (senderId === undefined || senderId === "") {
+      return undefined;
+    }
+    if (typeof senderId !== "string" || !isUUID(senderId, "4")) {
+      throw new BadRequestException("senderId must be a UUID v4 when provided");
+    }
+    return senderId;
   }
 }
