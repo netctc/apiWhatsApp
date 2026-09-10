@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import {
   BadGatewayException,
@@ -19,6 +20,11 @@ import {
   assertMediaContentSignature,
   MediaContentSignatureError,
 } from "./media-content-signature.js";
+import {
+  MediaBinaryStorageError,
+  MediaBinaryStorageService,
+  type StagedMediaBinary,
+} from "./media-binary-storage.service.js";
 import {
   MediaMalwareScanError,
   MediaMalwareScannerService,
@@ -47,6 +53,7 @@ export class MediaService {
     private readonly senderResolver: MetaSenderResolverService,
     private readonly metaMedia: MetaMediaClient,
     private readonly malwareScanner: MediaMalwareScannerService,
+    private readonly binaryStorage: MediaBinaryStorageService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -55,6 +62,9 @@ export class MediaService {
     fields: Record<string, unknown>,
     file: StoredMediaUploadFile | undefined,
   ) {
+    let staged: StagedMediaBinary | undefined;
+    let registryReserved = false;
+
     try {
       if (!file?.path) {
         throw new BadRequestException("Multipart field 'file' is required");
@@ -84,8 +94,19 @@ export class MediaService {
         throw error;
       }
 
+      const assetId = randomUUID();
       try {
-        await this.malwareScanner.scan(file.path);
+        staged = await this.binaryStorage.stage(file.path, tenantId, assetId);
+      } catch (error) {
+        if (error instanceof MediaBinaryStorageError) {
+          this.logger.error("Media binary storage staging failed closed");
+          throw new ServiceUnavailableException("Media binary storage is unavailable");
+        }
+        throw error;
+      }
+
+      try {
+        await this.malwareScanner.scan(staged.filePath);
       } catch (error) {
         if (error instanceof MediaMalwareScanError) {
           if (error.reason === "MALWARE_DETECTED") {
@@ -111,6 +132,7 @@ export class MediaService {
       try {
         asset = await this.prisma.mediaAsset.create({
           data: {
+            id: assetId,
             tenantId,
             senderId: sender.internalSenderId,
             category: policy.category,
@@ -118,9 +140,13 @@ export class MediaService {
             size: file.size,
             scanMode: scan.mode,
             scanStatus: scan.status,
+            storageMode: staged.mode,
+            storageKey: staged.key,
+            storedAt: staged.storedAt,
             expiresAt,
           },
         });
+        registryReserved = true;
       } catch (error) {
         this.logger.error(
           `Unable to create media asset registry entry tenant=${tenantId} sender=${sender.internalSenderId}`,
@@ -133,7 +159,7 @@ export class MediaService {
       try {
         const uploaded = await this.metaMedia.uploadMedia(
           {
-            filePath: file.path,
+            filePath: staged.filePath,
             mimeType: policy.mimeType,
             providerFilename: policy.providerFilename,
           },
@@ -188,6 +214,11 @@ export class MediaService {
         throw error;
       }
     } finally {
+      if (staged && !registryReserved) {
+        await this.binaryStorage.discard(staged.mode, staged.key).catch(() => {
+          this.logger.error(`Unable to remove unreserved staged media binary mode=${staged?.mode}`);
+        });
+      }
       if (file?.path) {
         await rm(file.path, { force: true }).catch(() => undefined);
       }
@@ -249,6 +280,9 @@ export class MediaService {
       size: asset.size,
       scanMode: asset.scanMode,
       scanStatus: asset.scanStatus,
+      storageMode: asset.storageMode,
+      binaryRetained: Boolean(asset.storageKey),
+      storedAt: asset.storedAt,
       state,
       providerUploadedAt: asset.providerUploadedAt,
       expiresAt: asset.expiresAt,
