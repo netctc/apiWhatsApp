@@ -174,6 +174,21 @@ The suite requires:
 
 This exercises at-least-once RabbitMQ delivery behavior and proves an active processing lease prevents concurrent duplicate provider sends.
 
+## Out-of-order delivery webhooks
+
+Delivery status events are append-only evidence, but the authoritative `Message.status` must progress monotonically. A delayed `sent` event is therefore still stored in `MessageStatusEvent` even when the message is already `delivered` or `read`, while the current message state is not downgraded.
+
+Status progression is decided while holding a PostgreSQL row lock on the target message. The webhook status service locates the message by provider message ID inside the transaction with `FOR UPDATE`, then evaluates the status rank against the state observed after the lock is acquired. This is required for multi-replica deployments: two webhook processors may claim independent webhook events concurrently even though each individual processor handles its own batch serially.
+
+The real-database integration coverage uses independent Prisma clients to exercise sequential and concurrent `read` plus delayed `sent` transitions. It requires:
+
+- the final authoritative state to remain `READ`;
+- the provider `readAt` timestamp to remain authoritative;
+- both `SENT` and `READ` status events to be retained as history;
+- repeated concurrent transition pairs to remain monotonic across independent database clients.
+
+This closes the race where both processors could previously read the same pre-transition status before entering their separate transactions and a slower `sent` transaction could overwrite a committed `read` state.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -215,13 +230,12 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, and duplicate RabbitMQ delivery protection. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, and monotonic delayed/out-of-order delivery status handling. Further failure-injection suites should be added incrementally for:
 
 - RabbitMQ unavailable during outbox publication;
 - Redis unavailable during outbound rate limiting;
 - worker termination while a processing lease is active;
 - API termination after DB commit but before outbox publish;
-- delayed/out-of-order delivery webhooks;
 - webhook burst while campaigns are running.
 
 ## Local execution example
