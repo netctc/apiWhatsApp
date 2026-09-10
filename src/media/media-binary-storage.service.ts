@@ -4,6 +4,10 @@ import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Injectable } from "@nestjs/common";
 import {
+  evaluateMediaStorageCapacity,
+  MediaStorageCapacityPolicyError,
+} from "./media-storage-capacity.js";
+import {
   MediaS3StorageError,
   MediaS3StorageService,
   type MediaS3Diagnostics,
@@ -79,6 +83,47 @@ export class MediaBinaryStorageService {
     const root = this.filesystemRoot();
     this.pathForKey(root, key);
     return { mode, key };
+  }
+
+  async assertCapacityFor(requiredBytes: number): Promise<void> {
+    const mode = this.mode();
+    if (mode === "DISABLED" || mode === "S3") {
+      return;
+    }
+
+    const root = this.filesystemRoot();
+    const minimumFreeBytes = this.readMinimumFreeBytes();
+    const minimumFreePercent = this.readMinimumFreePercent();
+
+    try {
+      const rootStat = await stat(root);
+      if (!rootStat.isDirectory()) {
+        throw new Error("storage root is not a directory");
+      }
+      await access(root, constants.R_OK | constants.W_OK);
+      const capacity = await statfs(root);
+      const totalBytes = capacity.blocks * capacity.bsize;
+      const freeBytes = capacity.bavail * capacity.bsize;
+      const decision = evaluateMediaStorageCapacity({
+        totalBytes,
+        freeBytes,
+        minimumFreeBytes,
+        minimumFreePercent,
+        requiredBytes,
+      });
+
+      if (!decision.allowed) {
+        throw new MediaBinaryStorageError("Insufficient filesystem media storage capacity");
+      }
+    } catch (error) {
+      if (error instanceof MediaBinaryStorageError) {
+        throw error;
+      }
+      if (error instanceof MediaStorageCapacityPolicyError) {
+        throw new MediaBinaryStorageError("Invalid filesystem media storage capacity");
+      }
+      throw new MediaBinaryStorageError("Filesystem media storage is unavailable");
+    }
   }
 
   async stage(sourcePath: string, target: MediaBinaryStorageTarget): Promise<StagedMediaBinary> {
@@ -222,9 +267,15 @@ export class MediaBinaryStorageService {
       const capacity = await statfs(root);
       const totalBytes = capacity.blocks * capacity.bsize;
       const freeBytes = capacity.bavail * capacity.bsize;
-      const freePercent = totalBytes > 0 ? (freeBytes / totalBytes) * 100 : 0;
+      const decision = evaluateMediaStorageCapacity({
+        totalBytes,
+        freeBytes,
+        minimumFreeBytes,
+        minimumFreePercent,
+      });
+      const freePercent = decision.projectedFreePercent;
 
-      if (freeBytes < minimumFreeBytes || freePercent < minimumFreePercent) {
+      if (!decision.allowed) {
         return {
           status: "down",
           mode: "filesystem",
