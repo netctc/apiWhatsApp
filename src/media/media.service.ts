@@ -31,6 +31,7 @@ import {
 const DEFAULT_MEDIA_ASSET_TTL_DAYS = 30;
 const MAX_MEDIA_ASSET_TTL_DAYS = 3650;
 const MEDIA_ASSET_LIST_LIMIT = 100;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface StoredMediaUploadFile {
   path: string;
@@ -99,6 +100,7 @@ export class MediaService {
       }
 
       const ttlDays = this.readAssetTtlDays();
+      const expiresAt = new Date(Date.now() + ttlDays * DAY_MS);
       const sender = await this.senderResolver.resolveForTenant(tenantId, senderId);
       if (!sender.internalSenderId) {
         throw new Error("Tenant-scoped Meta sender resolution did not return an internal sender ID");
@@ -116,6 +118,7 @@ export class MediaService {
             size: file.size,
             scanMode: scan.mode,
             scanStatus: scan.status,
+            expiresAt,
           },
         });
       } catch (error) {
@@ -137,9 +140,6 @@ export class MediaService {
           sender,
         );
         const providerUploadedAt = new Date();
-        const expiresAt = new Date(
-          providerUploadedAt.getTime() + ttlDays * 24 * 60 * 60 * 1000,
-        );
 
         let completed: MediaAsset;
         try {
@@ -148,7 +148,6 @@ export class MediaService {
             data: {
               providerMediaId: uploaded.mediaId,
               providerUploadedAt,
-              expiresAt,
               failedAt: null,
               failureCode: null,
             },
