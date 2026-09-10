@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ValidationPipe, type INestApplication } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
-import { createServer, type IncomingMessage, type Server } from "node:http";
 import request from "supertest";
 import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
@@ -74,6 +78,7 @@ describe("media asset registry integration", () => {
   let prisma: PrismaService;
   let retention: MediaAssetRetentionService;
   let metaServer: Server;
+  let storageRoot: string;
   let tenantId: string;
   let otherTenantId: string;
   let senderId: string;
@@ -84,6 +89,7 @@ describe("media asset registry integration", () => {
 
   beforeAll(async () => {
     requireInfrastructure();
+    storageRoot = await mkdtemp(join(tmpdir(), "api-whatsapp-media-registry-storage-"));
 
     metaServer = createServer(async (req, res) => {
       try {
@@ -117,6 +123,8 @@ describe("media asset registry integration", () => {
     process.env.META_WEBHOOK_VERIFY_TOKEN = "media-registry-integration-verify-token";
     process.env.TEST_META_ACCESS_TOKEN = "media-registry-integration-access-token";
     process.env.MEDIA_MALWARE_SCAN_MODE = "disabled";
+    process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
+    process.env.MEDIA_FILESYSTEM_STORAGE_PATH = storageRoot;
     process.env.MEDIA_ASSET_TTL_DAYS = String(TTL_DAYS);
     process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS = "3600000";
     process.env.OUTBOUND_QUEUE_NAME = `whatsapp.media-registry.${process.pid}.${Date.now()}`;
@@ -181,6 +189,8 @@ describe("media asset registry integration", () => {
   afterAll(async () => {
     delete process.env.MEDIA_ASSET_TTL_DAYS;
     delete process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS;
+    delete process.env.MEDIA_BINARY_STORAGE_MODE;
+    delete process.env.MEDIA_FILESYSTEM_STORAGE_PATH;
     process.env.MEDIA_MALWARE_SCAN_MODE = "disabled";
 
     if (prisma) {
@@ -196,9 +206,12 @@ describe("media asset registry integration", () => {
     if (metaServer) {
       await closeServer(metaServer);
     }
+    if (storageRoot) {
+      await rm(storageRoot, { recursive: true, force: true });
+    }
   });
 
-  it("persists successful upload metadata and exposes it only through media:read", async () => {
+  it("retains successful upload bytes under an internal key and exposes only safe storage evidence", async () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x41, 0x42, 0xff, 0xd9]);
 
     const upload = await request(app.getHttpServer())
@@ -233,6 +246,9 @@ describe("media asset registry integration", () => {
     expect(persisted.size).toBe(jpeg.length);
     expect(persisted.scanMode).toBe("DISABLED");
     expect(persisted.scanStatus).toBe("NOT_SCANNED");
+    expect(persisted.storageMode).toBe("FILESYSTEM");
+    expect(persisted.storageKey).toBe(`${tenantId}/${persisted.id}`);
+    expect(persisted.storedAt).not.toBeNull();
     expect(persisted.failureCode).toBeNull();
     expect(persisted.failedAt).toBeNull();
     expect(persisted.providerUploadedAt).not.toBeNull();
@@ -241,22 +257,27 @@ describe("media asset registry integration", () => {
     expect(ttlFromCreation).toBeGreaterThan(TTL_DAYS * DAY_MS - 5000);
     expect(ttlFromCreation).toBeLessThanOrEqual(TTL_DAYS * DAY_MS);
 
+    const storedPath = join(storageRoot, tenantId, persisted.id);
+    await expect(readFile(storedPath)).resolves.toEqual(jpeg);
+
     const list = await request(app.getHttpServer())
       .get("/api/v1/media")
       .set("X-API-Key", readWriteKey)
       .expect(200);
-    expect(list.body).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          assetId: persisted.id,
-          mediaId: upload.body.mediaId,
-          senderId,
-          state: "ACTIVE",
-          scanMode: "DISABLED",
-          scanStatus: "NOT_SCANNED",
-        }),
-      ]),
+    const listed = list.body.find((asset: { assetId?: string }) => asset.assetId === persisted.id);
+    expect(listed).toEqual(
+      expect.objectContaining({
+        assetId: persisted.id,
+        mediaId: upload.body.mediaId,
+        senderId,
+        state: "ACTIVE",
+        scanMode: "DISABLED",
+        scanStatus: "NOT_SCANNED",
+        storageMode: "FILESYSTEM",
+        binaryRetained: true,
+      }),
     );
+    expect(listed).not.toHaveProperty("storageKey");
 
     const detail = await request(app.getHttpServer())
       .get(`/api/v1/media/${persisted.id}`)
@@ -266,9 +287,12 @@ describe("media asset registry integration", () => {
       expect.objectContaining({
         assetId: persisted.id,
         mediaId: upload.body.mediaId,
+        storageMode: "FILESYSTEM",
+        binaryRetained: true,
         state: "ACTIVE",
       }),
     );
+    expect(detail.body).not.toHaveProperty("storageKey");
 
     await request(app.getHttpServer())
       .get(`/api/v1/media/${persisted.id}`)
@@ -281,19 +305,29 @@ describe("media asset registry integration", () => {
       .expect(403);
   });
 
-  it("derives EXPIRED from local TTL and purges expired registry metadata", async () => {
+  it("deletes the retained binary before purging expired registry metadata", async () => {
+    const assetId = randomUUID();
+    const storageKey = `${tenantId}/${assetId}`;
+    const storedPath = join(storageRoot, tenantId, assetId);
     const providerUploadedAt = new Date(Date.now() - 2 * DAY_MS);
     const expiresAt = new Date(Date.now() - DAY_MS);
+    await mkdir(join(storageRoot, tenantId), { recursive: true, mode: 0o700 });
+    await writeFile(storedPath, Buffer.from("expired-binary"), { mode: 0o600 });
+
     const expired = await prisma.mediaAsset.create({
       data: {
+        id: assetId,
         tenantId,
         senderId,
         providerMediaId: `media.registry.expired.${Date.now()}`,
         category: "IMAGE",
         mimeType: "image/jpeg",
-        size: 12,
+        size: 14,
         scanMode: "CLAMAV",
         scanStatus: "CLEAN",
+        storageMode: "FILESYSTEM",
+        storageKey,
+        storedAt: new Date(Date.now() - 3 * DAY_MS),
         providerUploadedAt,
         expiresAt,
       },
@@ -311,10 +345,13 @@ describe("media asset registry integration", () => {
         state: "EXPIRED",
         scanMode: "CLAMAV",
         scanStatus: "CLEAN",
+        storageMode: "FILESYSTEM",
+        binaryRetained: true,
       }),
     );
 
     await expect(retention.purgeExpired()).resolves.toBeGreaterThanOrEqual(1);
+    await expect(access(storedPath)).rejects.toThrow();
     await request(app.getHttpServer())
       .get(`/api/v1/media/${expired.id}`)
       .set("X-API-Key", readWriteKey)
