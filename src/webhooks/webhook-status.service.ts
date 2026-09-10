@@ -49,20 +49,23 @@ export class WebhookStatusService {
       return;
     }
 
-    const message = await this.prisma.message.findUnique({
-      where: { providerMessageId: providerStatus.id },
-    });
-
-    if (!message) {
-      this.logger.debug(`Ignoring status for unknown provider message ${providerStatus.id}`);
-      return;
-    }
-
     const eventTimestamp = this.parseTimestamp(providerStatus.timestamp) ?? new Date();
     const error = this.extractError(providerStatus.errors);
-    const shouldApply = this.shouldApplyStatus(message.status, targetStatus);
 
     await this.prisma.$transaction(async (transaction) => {
+      const rows = await transaction.$queryRaw<Array<{ id: string; status: MessageStatus }>>(Prisma.sql`
+        SELECT "id", "status"
+        FROM "Message"
+        WHERE "providerMessageId" = ${providerStatus.id}
+        FOR UPDATE
+      `);
+      const message = rows[0];
+
+      if (!message) {
+        this.logger.debug(`Ignoring status for unknown provider message ${providerStatus.id}`);
+        return;
+      }
+
       await transaction.messageStatusEvent.create({
         data: {
           messageId: message.id,
@@ -72,7 +75,7 @@ export class WebhookStatusService {
         },
       });
 
-      if (!shouldApply) {
+      if (!this.shouldApplyStatus(message.status, targetStatus)) {
         return;
       }
 
@@ -220,8 +223,9 @@ export class WebhookStatusService {
         ? (value.error_data as { details?: unknown }).details
         : undefined;
 
-    const message = [value.title, value.message, details]
-      .find((candidate) => typeof candidate === "string" && candidate.length > 0);
+    const message = [value.title, value.message, details].find(
+      (candidate) => typeof candidate === "string" && candidate.length > 0,
+    );
 
     return {
       code: typeof value.code === "number" || typeof value.code === "string" ? String(value.code) : null,
