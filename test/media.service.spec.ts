@@ -8,9 +8,7 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from "@nestjs/common";
-import {
-  MediaMalwareScanError,
-} from "../src/media/media-malware-scanner.service.js";
+import { MediaMalwareScanError } from "../src/media/media-malware-scanner.service.js";
 import { MediaService } from "../src/media/media.service.js";
 import { MetaApiError } from "../src/meta/meta-api.error.js";
 
@@ -18,6 +16,7 @@ const TENANT_ID = "123e4567-e89b-42d3-a456-426614174000";
 const OTHER_TENANT_ID = "123e4567-e89b-42d3-a456-426614174099";
 const SENDER_ID = "123e4567-e89b-42d3-a456-426614174001";
 const ASSET_ID = "123e4567-e89b-42d3-a456-426614174002";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 async function createTempFile(bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9])) {
   const directory = await mkdtemp(join(tmpdir(), "api-whatsapp-media-test-"));
@@ -50,7 +49,7 @@ describe("MediaService", () => {
     scanMode: "DISABLED",
     scanStatus: "NOT_SCANNED",
     providerUploadedAt: null,
-    expiresAt: null,
+    expiresAt: new Date("2026-10-10T12:00:00.000Z"),
     failedAt: null,
     failureCode: null,
     createdAt: new Date("2026-09-10T12:00:00.000Z"),
@@ -82,7 +81,10 @@ describe("MediaService", () => {
     });
     uploadMedia.mockResolvedValue({ mediaId: "media-123" });
     scan.mockResolvedValue(undefined);
-    mediaAssetCreate.mockResolvedValue(pendingAsset);
+    mediaAssetCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+      ...pendingAsset,
+      ...data,
+    }));
     mediaAssetUpdate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       ...pendingAsset,
       ...data,
@@ -92,8 +94,9 @@ describe("MediaService", () => {
     mediaAssetFindFirst.mockResolvedValue(null);
   });
 
-  it("scans, creates the registry entry before Meta, finalizes it after upload, and removes the temporary file", async () => {
+  it("scans, reserves expiring registry metadata before Meta, finalizes it after upload, and removes the temporary file", async () => {
     const temp = await createTempFile();
+    const startedAt = Date.now();
     try {
       const result = await service.upload(TENANT_ID, { senderId: SENDER_ID }, {
         path: temp.filePath,
@@ -113,6 +116,7 @@ describe("MediaService", () => {
           size: temp.size,
           scanMode: "DISABLED",
           scanStatus: "NOT_SCANNED",
+          expiresAt: expect.any(Date),
         },
       });
       expect(mediaAssetCreate.mock.invocationCallOrder[0]).toBeLessThan(uploadMedia.mock.invocationCallOrder[0]);
@@ -129,11 +133,13 @@ describe("MediaService", () => {
         data: expect.objectContaining({
           providerMediaId: "media-123",
           providerUploadedAt: expect.any(Date),
-          expiresAt: expect.any(Date),
           failedAt: null,
           failureCode: null,
         }),
       });
+      expect(mediaAssetUpdate.mock.calls[0]?.[0]).not.toEqual(
+        expect.objectContaining({ data: expect.objectContaining({ expiresAt: expect.anything() }) }),
+      );
       expect(result).toEqual({
         mediaId: "media-123",
         senderId: SENDER_ID,
@@ -141,12 +147,12 @@ describe("MediaService", () => {
         mimeType: "image/jpeg",
         size: temp.size,
       });
-      const completion = mediaAssetUpdate.mock.calls[0]?.[0] as {
-        data: { providerUploadedAt: Date; expiresAt: Date };
+
+      const reservation = mediaAssetCreate.mock.calls[0]?.[0] as {
+        data: { expiresAt: Date };
       };
-      expect(completion.data.expiresAt.getTime() - completion.data.providerUploadedAt.getTime()).toBe(
-        30 * 24 * 60 * 60 * 1000,
-      );
+      expect(reservation.data.expiresAt.getTime()).toBeGreaterThanOrEqual(startedAt + 30 * DAY_MS);
+      expect(reservation.data.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 30 * DAY_MS);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
@@ -157,6 +163,7 @@ describe("MediaService", () => {
     process.env.MEDIA_MALWARE_SCAN_MODE = "clamav";
     process.env.MEDIA_ASSET_TTL_DAYS = "7";
     const temp = await createTempFile();
+    const startedAt = Date.now();
 
     try {
       await service.upload(TENANT_ID, {}, {
@@ -166,14 +173,17 @@ describe("MediaService", () => {
       });
 
       expect(mediaAssetCreate).toHaveBeenCalledWith({
-        data: expect.objectContaining({ scanMode: "CLAMAV", scanStatus: "CLEAN" }),
+        data: expect.objectContaining({
+          scanMode: "CLAMAV",
+          scanStatus: "CLEAN",
+          expiresAt: expect.any(Date),
+        }),
       });
-      const completion = mediaAssetUpdate.mock.calls[0]?.[0] as {
-        data: { providerUploadedAt: Date; expiresAt: Date };
+      const reservation = mediaAssetCreate.mock.calls[0]?.[0] as {
+        data: { expiresAt: Date };
       };
-      expect(completion.data.expiresAt.getTime() - completion.data.providerUploadedAt.getTime()).toBe(
-        7 * 24 * 60 * 60 * 1000,
-      );
+      expect(reservation.data.expiresAt.getTime()).toBeGreaterThanOrEqual(startedAt + 7 * DAY_MS);
+      expect(reservation.data.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 7 * DAY_MS);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
@@ -277,7 +287,7 @@ describe("MediaService", () => {
     }
   });
 
-  it("records a failed registry lifecycle when Meta is temporarily unavailable", async () => {
+  it("records a failed registry lifecycle with the same retention deadline when Meta is temporarily unavailable", async () => {
     uploadMedia.mockRejectedValue(
       new MetaApiError("provider timeout", {
         retryable: true,
@@ -294,6 +304,9 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
+      expect(mediaAssetCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({ expiresAt: expect.any(Date) }),
+      });
       expect(mediaAssetUpdate).toHaveBeenCalledWith({
         where: { id: ASSET_ID },
         data: {
@@ -312,8 +325,8 @@ describe("MediaService", () => {
       {
         ...pendingAsset,
         providerMediaId: "media-expired",
-        providerUploadedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
-        expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        providerUploadedAt: new Date(Date.now() - 3 * DAY_MS),
+        expiresAt: new Date(Date.now() - DAY_MS),
       },
     ]);
 
