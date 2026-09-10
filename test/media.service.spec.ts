@@ -69,6 +69,31 @@ describe("MediaService", () => {
     }
   });
 
+  it("rejects a supported declared MIME when file content has a different signature", async () => {
+    const temp = await createTempFile(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    try {
+      await expect(
+        service.upload(TENANT_ID, { senderId: SENDER_ID }, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({
+          message: "Media file content does not match declared MIME type: image/jpeg",
+        }),
+      });
+
+      expect(resolveForTenant).not.toHaveBeenCalled();
+      expect(uploadMedia).not.toHaveBeenCalled();
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
   it("removes the temporary file when Meta is temporarily unavailable", async () => {
     uploadMedia.mockRejectedValue(
       new MetaApiError("provider timeout", {
