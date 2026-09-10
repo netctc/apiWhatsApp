@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
+import { SecretReferenceService } from "./secret-reference.service.js";
 
 export interface MetaSenderContext {
   internalSenderId?: string;
@@ -20,6 +21,7 @@ export class MetaSenderResolverService {
   constructor(
     private readonly config: ConfigService,
     private readonly phoneNumbers: PhoneNumbersService,
+    private readonly secretReferences: SecretReferenceService,
   ) {}
 
   async resolve(senderId: string | null): Promise<MetaSenderContext> {
@@ -44,35 +46,22 @@ export class MetaSenderResolverService {
     return {
       internalSenderId: sender.id,
       wabaId,
-      accessToken: this.resolveCredentialRef(sender.credentialRef),
+      accessToken: await this.secretReferences.resolve(sender.credentialRef),
     };
   }
 
-  private toSenderContext(sender: {
+  private async toSenderContext(sender: {
     id: string;
     providerPhoneNumberId: string;
     credentialRef: string;
     rateLimitPerSecond: number | null;
-  }): MetaSenderContext {
+  }): Promise<MetaSenderContext> {
     return {
       internalSenderId: sender.id,
       phoneNumberId: sender.providerPhoneNumberId,
-      accessToken: this.resolveCredentialRef(sender.credentialRef),
+      accessToken: await this.secretReferences.resolve(sender.credentialRef),
       rateLimitPerSecond: sender.rateLimitPerSecond ?? undefined,
     };
-  }
-
-  private resolveCredentialRef(credentialRef: string): string {
-    if (!credentialRef.startsWith("env:")) {
-      throw new Error(`Unsupported Meta credential reference ${credentialRef}`);
-    }
-
-    const variableName = credentialRef.slice(4);
-    const value = this.config.get<string>(variableName);
-    if (!value) {
-      throw new Error(`Meta credential ${credentialRef} is not available in the runtime environment`);
-    }
-    return value;
   }
 
   private required(name: string): string {
