@@ -24,7 +24,7 @@ The integration suite requires real:
 - Redis;
 - RabbitMQ.
 
-It starts the Nest API and outbound worker in the same test process and starts a local HTTP Meta Cloud API mock on an ephemeral loopback port.
+It starts the Nest API and outbound worker in the same test process and starts local controlled HTTP Meta Cloud API mocks on ephemeral loopback ports.
 
 The integration test applies the real production Prisma migration history to the configured database before the suite is executed in CI.
 
@@ -71,7 +71,7 @@ Security constraints:
 - query strings and fragments in the configured base URL are rejected;
 - leaving the variable unset always uses the official Graph host.
 
-The integration suite uses an HTTP server bound to `127.0.0.1` and therefore never contacts Meta externally.
+The integration suites use HTTP servers bound to `127.0.0.1` and therefore never contact Meta externally.
 
 ## Core end-to-end scenario
 
@@ -120,6 +120,28 @@ The test requires:
 
 The API test server is explicitly bound once before concurrent Supertest requests. Every burst request is awaited to completion even when one fails, preventing test-harness socket races or teardown races from being mistaken for application defects.
 
+## Meta provider failure injection
+
+The real-infrastructure gate also runs deterministic provider-failure scenarios through the production API, transactional outbox, RabbitMQ topology, outbound worker, Redis rate limiter, PostgreSQL persistence, and Meta HTTP client. Only the external Meta endpoint is replaced by the controlled loopback seam.
+
+The transient scenario injects:
+
+```text
+HTTP 429 -> retry queue -> HTTP 503 -> retry queue -> HTTP 200
+```
+
+It requires the logical message to reach `SUBMITTED`, records three provider attempts, verifies three `PROCESSING` lifecycle entries, and proves that the real RabbitMQ retry queues redeliver the same logical message before eventual success. Retry delays are shortened only inside this integration suite so CI remains fast.
+
+The permanent-error scenario injects a non-retryable Meta HTTP 400 response and requires:
+
+- one provider attempt only;
+- persisted `FAILED` state and Meta error code;
+- no provider message ID;
+- publication to the real transactional dead-letter queue;
+- a DLQ payload containing the expected message ID, traffic class, failure reason, and failure timestamp.
+
+These tests verify the runtime retry/DLQ contract rather than only testing retry classification in isolation.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -159,14 +181,12 @@ Measure at minimum:
 - process memory/CPU;
 - webhook processing lag under concurrent outbound load.
 
-## Failure-injection scenarios still recommended
+## Remaining failure-injection scenarios
 
-The real-infrastructure gate now proves the normal durable path. Separate failure-injection suites should be added incrementally for:
+The gate now proves both the normal durable path and Meta transient/permanent failure handling. Further failure-injection suites should be added incrementally for:
 
 - RabbitMQ unavailable during outbox publication;
 - Redis unavailable during outbound rate limiting;
-- transient Meta 429/5xx followed by retry success;
-- permanent Meta errors to DLQ;
 - worker termination while a processing lease is active;
 - API termination after DB commit but before outbox publish;
 - duplicated RabbitMQ deliveries;
