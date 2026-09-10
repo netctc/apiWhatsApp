@@ -23,7 +23,6 @@ import {
 import {
   MediaBinaryStorageError,
   MediaBinaryStorageService,
-  type StagedMediaBinary,
 } from "./media-binary-storage.service.js";
 import {
   MediaMalwareScanError,
@@ -62,9 +61,6 @@ export class MediaService {
     fields: Record<string, unknown>,
     file: StoredMediaUploadFile | undefined,
   ) {
-    let staged: StagedMediaBinary | undefined;
-    let registryReserved = false;
-
     try {
       if (!file?.path) {
         throw new BadRequestException("Multipart field 'file' is required");
@@ -95,18 +91,19 @@ export class MediaService {
       }
 
       const assetId = randomUUID();
+      let storageTarget;
       try {
-        staged = await this.binaryStorage.stage(file.path, tenantId, assetId);
+        storageTarget = this.binaryStorage.targetFor(tenantId, assetId);
       } catch (error) {
         if (error instanceof MediaBinaryStorageError) {
-          this.logger.error("Media binary storage staging failed closed");
+          this.logger.error("Media binary storage configuration failed closed");
           throw new ServiceUnavailableException("Media binary storage is unavailable");
         }
         throw error;
       }
 
       try {
-        await this.malwareScanner.scan(staged.filePath);
+        await this.malwareScanner.scan(file.path);
       } catch (error) {
         if (error instanceof MediaMalwareScanError) {
           if (error.reason === "MALWARE_DETECTED") {
@@ -140,13 +137,12 @@ export class MediaService {
             size: file.size,
             scanMode: scan.mode,
             scanStatus: scan.status,
-            storageMode: staged.mode,
-            storageKey: staged.key,
-            storedAt: staged.storedAt,
+            storageMode: storageTarget.mode,
+            storageKey: storageTarget.key,
+            storedAt: null,
             expiresAt,
           },
         });
-        registryReserved = true;
       } catch (error) {
         this.logger.error(
           `Unable to create media asset registry entry tenant=${tenantId} sender=${sender.internalSenderId}`,
@@ -154,6 +150,34 @@ export class MediaService {
         throw new ServiceUnavailableException("Media asset registry is temporarily unavailable", {
           cause: error,
         });
+      }
+
+      let staged;
+      try {
+        staged = await this.binaryStorage.stage(file.path, storageTarget);
+      } catch (error) {
+        if (error instanceof MediaBinaryStorageError) {
+          await this.markAssetFailed(asset.id, "STORAGE_ERROR");
+          this.logger.error(`Media binary storage staging failed asset=${asset.id}`);
+          throw new ServiceUnavailableException("Media binary storage is unavailable");
+        }
+        await this.markAssetFailed(asset.id, "STORAGE_ERROR");
+        throw error;
+      }
+
+      if (staged.storedAt) {
+        try {
+          await this.prisma.mediaAsset.update({
+            where: { id: asset.id },
+            data: { storedAt: staged.storedAt },
+          });
+        } catch (error) {
+          this.logger.error(`Unable to finalize media storage metadata asset=${asset.id}`);
+          await this.markAssetFailed(asset.id, "STORAGE_METADATA_ERROR");
+          throw new ServiceUnavailableException("Media asset registry finalization failed", {
+            cause: error,
+          });
+        }
       }
 
       try {
@@ -214,11 +238,6 @@ export class MediaService {
         throw error;
       }
     } finally {
-      if (staged && !registryReserved) {
-        await this.binaryStorage.discard(staged.mode, staged.key).catch(() => {
-          this.logger.error(`Unable to remove unreserved staged media binary mode=${staged?.mode}`);
-        });
-      }
       if (file?.path) {
         await rm(file.path, { force: true }).catch(() => undefined);
       }
@@ -281,7 +300,7 @@ export class MediaService {
       scanMode: asset.scanMode,
       scanStatus: asset.scanStatus,
       storageMode: asset.storageMode,
-      binaryRetained: Boolean(asset.storageKey),
+      binaryRetained: Boolean(asset.storageKey && asset.storedAt),
       storedAt: asset.storedAt,
       state,
       providerUploadedAt: asset.providerUploadedAt,
