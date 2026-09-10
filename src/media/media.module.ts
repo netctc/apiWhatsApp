@@ -29,5 +29,6 @@ import { MediaService } from "./media.service.js";
     MediaAssetRetentionService,
     MediaService,
   ],
+  exports: [MediaBinaryStorageService],
 })
 export class MediaModule {}
