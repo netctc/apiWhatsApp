@@ -4,6 +4,12 @@ import { OperationalHealthService } from "../src/health/operational-health.servi
 describe("OperationalHealthService", () => {
   const originalRedisUrl = process.env.REDIS_URL;
   const originalRabbitMqUrl = process.env.RABBITMQ_URL;
+  const diagnostics = jest.fn();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    diagnostics.mockResolvedValue({ status: "up", mode: "disabled" });
+  });
 
   afterEach(() => {
     if (originalRedisUrl === undefined) {
@@ -22,20 +28,27 @@ describe("OperationalHealthService", () => {
     delete process.env.REDIS_URL;
     delete process.env.RABBITMQ_URL;
     const queryRaw = jest.fn();
-    const service = new OperationalHealthService({ $queryRaw: queryRaw } as never);
+    const service = new OperationalHealthService(
+      { $queryRaw: queryRaw } as never,
+      { diagnostics } as never,
+    );
 
     const report = service.live();
 
     expect(report.status).toBe("ok");
     expect(report.uptimeSeconds).toBeGreaterThanOrEqual(0);
     expect(queryRaw).not.toHaveBeenCalled();
+    expect(diagnostics).not.toHaveBeenCalled();
   });
 
-  it("reports missing Redis and RabbitMQ configuration as not ready while PostgreSQL is up", async () => {
+  it("reports missing Redis and RabbitMQ configuration as not ready while PostgreSQL and disabled storage are up", async () => {
     delete process.env.REDIS_URL;
     delete process.env.RABBITMQ_URL;
     const queryRaw = jest.fn().mockResolvedValue([{ ok: 1 }]);
-    const service = new OperationalHealthService({ $queryRaw: queryRaw } as never);
+    const service = new OperationalHealthService(
+      { $queryRaw: queryRaw } as never,
+      { diagnostics } as never,
+    );
 
     const report = await service.ready();
 
@@ -47,6 +60,8 @@ describe("OperationalHealthService", () => {
     expect(report.dependencies.rabbitmq).toEqual(
       expect.objectContaining({ status: "down", error: "not_configured" }),
     );
+    expect(report.dependencies.mediaStorage).toEqual({ status: "up", mode: "disabled" });
+    expect(diagnostics).toHaveBeenCalledTimes(1);
 
     await service.onModuleDestroy();
   });
