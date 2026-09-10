@@ -20,7 +20,7 @@ CREATE TABLE "MediaAsset" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "MediaAsset_providerMediaId_key" ON "MediaAsset"("providerMediaId");
+CREATE UNIQUE INDEX "MediaAsset_tenantId_providerMediaId_key" ON "MediaAsset"("tenantId", "providerMediaId");
 
 -- CreateIndex
 CREATE INDEX "MediaAsset_tenantId_createdAt_idx" ON "MediaAsset"("tenantId", "createdAt");
@@ -35,4 +35,4 @@ CREATE INDEX "MediaAsset_tenantId_senderId_createdAt_idx" ON "MediaAsset"("tenan
 ALTER TABLE "MediaAsset" ADD CONSTRAINT "MediaAsset_tenantId_fkey" FOREIGN KEY ("tenantId") REFERENCES "Tenant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "MediaAsset" ADD CONSTRAINT "MediaAsset_senderId_fkey" FOREIGN KEY ("senderId") REFERENCES "WhatsAppPhoneNumber"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "MediaAsset" ADD CONSTRAINT "MediaAsset_senderId_fkey" FOREIGN KEY ("senderId") REFERENCES "WhatsAppPhoneNumber"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
