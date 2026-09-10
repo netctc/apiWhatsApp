@@ -14,7 +14,7 @@ export interface OutboundQueueJob {
 }
 
 export interface QueueProcessingResult {
-  action: "ack" | "retry" | "dead";
+  action: "ack" | "retry" | "defer" | "dead";
   reason?: string;
 }
 
@@ -170,6 +170,12 @@ export class MessagingQueueService implements OnModuleDestroy {
         return;
       }
 
+      if (result.action === "defer") {
+        await this.scheduleDeferredRetry(channel, job, result.reason);
+        channel.ack(message);
+        return;
+      }
+
       const retryScheduled = await this.scheduleRetry(channel, job, result.reason);
       if (!retryScheduled) {
         await onExhausted(job, result.reason);
@@ -189,6 +195,42 @@ export class MessagingQueueService implements OnModuleDestroy {
       );
       channel.nack(message, false, true);
     }
+  }
+
+  private async scheduleDeferredRetry(
+    channel: ConfirmChannel,
+    job: OutboundQueueJob,
+    reason?: string,
+  ): Promise<void> {
+    const delay = Math.min(...this.retryDelays());
+    const retryQueue = this.trafficRetryQueueName(job.trafficClass, delay);
+    channel.sendToQueue(
+      retryQueue,
+      Buffer.from(
+        JSON.stringify({
+          messageId: job.messageId,
+          trafficClass: job.trafficClass,
+          ...(job.trace ? { trace: job.trace } : {}),
+        }),
+      ),
+      {
+        persistent: true,
+        contentType: "application/json",
+        messageId: job.messageId,
+        timestamp: Date.now(),
+        headers: {
+          "x-retry-count": job.attempt,
+          "x-traffic-class": job.trafficClass,
+          ...this.traceHeaders(job.trace),
+          ...(reason ? { "x-last-error": reason.slice(0, 512) } : {}),
+        },
+      },
+    );
+    await channel.waitForConfirms();
+
+    this.logger.warn(
+      `Deferred ${job.trafficClass} message ${job.messageId} for ${delay}ms without consuming retry budget`,
+    );
   }
 
   private async scheduleRetry(
