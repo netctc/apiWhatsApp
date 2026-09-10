@@ -14,6 +14,13 @@ interface MetaMockCall {
   body: Record<string, unknown>;
 }
 
+interface MetaMediaMockCall {
+  url: string;
+  authorization?: string;
+  contentType?: string;
+  body: Buffer;
+}
+
 interface BurstResult {
   status?: number;
   messageId?: string;
@@ -33,20 +40,18 @@ function requireInfrastructure(): void {
   }
 }
 
-function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+function readRawBody(request: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
-    request.on("end", () => {
-      try {
-        const text = Buffer.concat(chunks).toString("utf8");
-        resolve(text ? (JSON.parse(text) as Record<string, unknown>) : {});
-      } catch (error) {
-        reject(error);
-      }
-    });
+    request.on("end", () => resolve(Buffer.concat(chunks)));
     request.on("error", reject);
   });
+}
+
+async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const text = (await readRawBody(request)).toString("utf8");
+  return text ? (JSON.parse(text) as Record<string, unknown>) : {};
 }
 
 function listen(server: Server): Promise<number> {
@@ -107,31 +112,55 @@ describe("core messaging integration", () => {
   let metaServer: Server;
   let tenantId: string;
   let apiKey: string;
+  let senderId: string;
   let senderProviderId: string;
   const metaCalls: MetaMockCall[] = [];
+  const metaMediaCalls: MetaMediaMockCall[] = [];
 
   beforeAll(async () => {
     requireInfrastructure();
 
     let providerSequence = 0;
+    let mediaSequence = 0;
     metaServer = createServer(async (req, res) => {
       try {
-        if (req.method !== "POST" || !req.url?.endsWith("/messages")) {
+        if (req.method !== "POST") {
           res.statusCode = 404;
           res.end(JSON.stringify({ error: "not_found" }));
           return;
         }
 
-        const body = await readBody(req);
-        metaCalls.push({
-          url: req.url,
-          authorization: req.headers.authorization,
-          body,
-        });
-        providerSequence += 1;
-        res.statusCode = 200;
-        res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ messages: [{ id: `wamid.integration.${providerSequence}` }] }));
+        if (req.url?.endsWith("/messages")) {
+          const body = await readBody(req);
+          metaCalls.push({
+            url: req.url,
+            authorization: req.headers.authorization,
+            body,
+          });
+          providerSequence += 1;
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ messages: [{ id: `wamid.integration.${providerSequence}` }] }));
+          return;
+        }
+
+        if (req.url?.endsWith("/media")) {
+          const body = await readRawBody(req);
+          metaMediaCalls.push({
+            url: req.url,
+            authorization: req.headers.authorization,
+            contentType: req.headers["content-type"],
+            body,
+          });
+          mediaSequence += 1;
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ id: `media.integration.${mediaSequence}` }));
+          return;
+        }
+
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: "not_found" }));
       } catch (error) {
         res.statusCode = 500;
         res.end(JSON.stringify({ error: error instanceof Error ? error.message : "mock_failure" }));
@@ -195,7 +224,7 @@ describe("core messaging integration", () => {
         name: "integration",
         prefix: generated.prefix,
         keyHash: hashApiKey(apiKey, API_KEY_HASH_SECRET),
-        scopes: [ApiScope.MESSAGES_READ, ApiScope.MESSAGES_WRITE],
+        scopes: [ApiScope.MESSAGES_READ, ApiScope.MESSAGES_WRITE, ApiScope.MEDIA_WRITE],
       },
     });
 
@@ -213,7 +242,7 @@ describe("core messaging integration", () => {
     });
 
     senderProviderId = String(Date.now());
-    await prisma.whatsAppPhoneNumber.create({
+    const sender = await prisma.whatsAppPhoneNumber.create({
       data: {
         tenantId,
         providerPhoneNumberId: senderProviderId,
@@ -225,6 +254,7 @@ describe("core messaging integration", () => {
         isDefault: true,
       },
     });
+    senderId = sender.id;
   });
 
   afterAll(async () => {
@@ -367,6 +397,42 @@ describe("core messaging integration", () => {
         caption: "Integration delivery photo",
       },
     });
+  });
+
+  it("uploads bounded media through the tenant sender and Meta multipart endpoint", async () => {
+    const initialMetaMediaCalls = metaMediaCalls.length;
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+
+    const response = await request(app.getHttpServer())
+      .post("/api/v1/media")
+      .set("X-API-Key", apiKey)
+      .field("senderId", senderId)
+      .attach("file", jpeg, {
+        filename: "client-supplied-name.jpg",
+        contentType: "image/jpeg",
+      })
+      .expect(201);
+
+    expect(response.body).toEqual({
+      mediaId: "media.integration.1",
+      senderId,
+      category: "IMAGE",
+      mimeType: "image/jpeg",
+      size: jpeg.length,
+    });
+
+    expect(metaMediaCalls).toHaveLength(initialMetaMediaCalls + 1);
+    const call = metaMediaCalls.at(-1)!;
+    expect(call.url).toBe(`/v99.0/${senderProviderId}/media`);
+    expect(call.authorization).toBe("Bearer integration-meta-access-token");
+    expect(call.contentType).toMatch(/^multipart\/form-data; boundary=/);
+
+    const multipart = call.body.toString("latin1");
+    expect(multipart).toContain('name="messaging_product"');
+    expect(multipart).toContain("whatsapp");
+    expect(multipart).toContain('name="file"; filename="upload.jpg"');
+    expect(multipart).toContain("Content-Type: image/jpeg");
+    expect(multipart).not.toContain("client-supplied-name.jpg");
   });
 
   it("accepts a concurrent burst with zero HTTP errors and drains every message to SUBMITTED", async () => {

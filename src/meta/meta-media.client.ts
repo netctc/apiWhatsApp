@@ -1,38 +1,44 @@
+import { openAsBlob } from "node:fs";
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { APP_USER_AGENT } from "../version.js";
 import { MetaApiError } from "./meta-api.error.js";
 import { metaGraphUrl } from "./meta-graph-url.util.js";
-import { mapMessageToMetaPayload } from "./meta-message.mapper.js";
 import type { MetaSenderContext } from "./meta-sender-resolver.service.js";
 
-interface OutboundMessageRecord {
-  type: Parameters<typeof mapMessageToMetaPayload>[0]["type"];
-  to: string | null;
-  payload: unknown;
+export interface MetaMediaUploadInput {
+  filePath: string;
+  mimeType: string;
+  providerFilename: string;
 }
 
-export interface MetaSendMessageResult {
-  providerMessageId: string;
-  response: unknown;
+export interface MetaMediaUploadResult {
+  mediaId: string;
 }
 
 @Injectable()
-export class MetaWhatsAppClient {
+export class MetaMediaClient {
   constructor(private readonly config: ConfigService) {}
 
-  async sendMessage(message: OutboundMessageRecord, sender: MetaSenderContext): Promise<MetaSendMessageResult> {
+  async uploadMedia(
+    input: MetaMediaUploadInput,
+    sender: MetaSenderContext,
+  ): Promise<MetaMediaUploadResult> {
     const graphVersion = this.required("META_GRAPH_API_VERSION");
-    const timeoutMs = Number(this.config.get("META_HTTP_TIMEOUT_MS") ?? 15000);
+    const timeoutMs = this.uploadTimeoutMs();
 
     if (!/^v\d+\.\d+$/.test(graphVersion)) {
       throw new Error("META_GRAPH_API_VERSION must use the format vNN.N");
     }
 
-    const requestBody = mapMessageToMetaPayload(message);
+    const file = await openAsBlob(input.filePath, { type: input.mimeType });
+    const formData = new FormData();
+    formData.append("messaging_product", "whatsapp");
+    formData.append("file", file, input.providerFilename);
+
     const url = metaGraphUrl(
       this.config,
-      `${graphVersion}/${encodeURIComponent(sender.phoneNumberId)}/messages`,
+      `${graphVersion}/${encodeURIComponent(sender.phoneNumberId)}/media`,
     );
 
     let response: Response;
@@ -41,14 +47,13 @@ export class MetaWhatsAppClient {
         method: "POST",
         headers: {
           Authorization: `Bearer ${sender.accessToken}`,
-          "Content-Type": "application/json",
           "User-Agent": APP_USER_AGENT,
         },
-        body: JSON.stringify(requestBody),
+        body: formData,
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      throw new MetaApiError(error instanceof Error ? error.message : "Meta API request failed", {
+      throw new MetaApiError(error instanceof Error ? error.message : "Meta media upload failed", {
         retryable: true,
       });
     }
@@ -65,16 +70,24 @@ export class MetaWhatsAppClient {
       });
     }
 
-    const providerMessageId = this.extractProviderMessageId(responseBody);
-    if (!providerMessageId) {
-      throw new MetaApiError("Meta API response did not include a message id", {
+    const mediaId = this.extractMediaId(responseBody);
+    if (!mediaId) {
+      throw new MetaApiError("Meta API response did not include a media id", {
         httpStatus: response.status,
         retryable: false,
         response: responseBody,
       });
     }
 
-    return { providerMessageId, response: responseBody };
+    return { mediaId };
+  }
+
+  private uploadTimeoutMs(): number {
+    const value = Number(this.config.get("META_MEDIA_UPLOAD_TIMEOUT_MS") ?? 120000);
+    if (!Number.isFinite(value) || value < 1000 || value > 600000) {
+      throw new Error("META_MEDIA_UPLOAD_TIMEOUT_MS must be between 1000 and 600000 milliseconds");
+    }
+    return Math.floor(value);
   }
 
   private required(name: string): string {
@@ -98,23 +111,13 @@ export class MetaWhatsAppClient {
     }
   }
 
-  private extractProviderMessageId(value: unknown): string | undefined {
+  private extractMediaId(value: unknown): string | undefined {
     if (!value || typeof value !== "object") {
       return undefined;
     }
 
-    const messages = (value as { messages?: unknown }).messages;
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return undefined;
-    }
-
-    const first = messages[0];
-    if (!first || typeof first !== "object") {
-      return undefined;
-    }
-
-    const id = (first as { id?: unknown }).id;
-    return typeof id === "string" ? id : undefined;
+    const id = (value as { id?: unknown }).id;
+    return typeof id === "string" && id.trim() ? id : undefined;
   }
 
   private extractMetaError(value: unknown): { message?: string; code?: number; subcode?: number } {

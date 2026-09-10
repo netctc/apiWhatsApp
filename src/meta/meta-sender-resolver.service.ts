@@ -31,12 +31,12 @@ export class MetaSenderResolverService {
     }
 
     const sender = await this.phoneNumbers.findActiveById(senderId);
-    return {
-      internalSenderId: sender.id,
-      phoneNumberId: sender.providerPhoneNumberId,
-      accessToken: this.resolveCredentialRef(sender.credentialRef),
-      rateLimitPerSecond: sender.rateLimitPerSecond ?? undefined,
-    };
+    return this.toSenderContext(sender);
+  }
+
+  async resolveForTenant(tenantId: string, senderId?: string): Promise<MetaSenderContext> {
+    const sender = await this.phoneNumbers.resolveForTenant(tenantId, senderId);
+    return this.toSenderContext(sender);
   }
 
   async resolveWaba(tenantId: string, senderId?: string): Promise<MetaWabaContext> {
@@ -45,6 +45,20 @@ export class MetaSenderResolverService {
       internalSenderId: sender.id,
       wabaId,
       accessToken: this.resolveCredentialRef(sender.credentialRef),
+    };
+  }
+
+  private toSenderContext(sender: {
+    id: string;
+    providerPhoneNumberId: string;
+    credentialRef: string;
+    rateLimitPerSecond: number | null;
+  }): MetaSenderContext {
+    return {
+      internalSenderId: sender.id,
+      phoneNumberId: sender.providerPhoneNumberId,
+      accessToken: this.resolveCredentialRef(sender.credentialRef),
+      rateLimitPerSecond: sender.rateLimitPerSecond ?? undefined,
     };
   }
 
