@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.16.0
+## Current release: 0.17.0
 
 Engineering language is English for source code, API contracts, tests, operational documentation, logs, and commit messages.
 
@@ -18,6 +18,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - WABA template synchronization and lifecycle tracking
 - Local `APPROVED` template enforcement before outbound creation
 - Outbound text plus image/video/audio/document media messaging
+- Tenant-scoped direct media upload to Meta with bounded disk-backed multipart handling
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues, retry queues, DLQs, and traffic-class prefetch
 - Priority-aware Redis sender capacity reservation
@@ -41,6 +42,8 @@ Engineering language is English for source code, API contracts, tests, operation
 flowchart LR
     Client[CRM / ERP / Application] --> API[REST API]
     API --> DB[(PostgreSQL)]
+    API --> Temp[Ephemeral media file]
+    Temp --> Meta[Meta Cloud API]
     DB --> Outbox[Transactional Outbox]
     Outbox --> Router[Traffic Router]
     Router --> OTP[(RabbitMQ OTP)]
@@ -50,7 +53,7 @@ flowchart LR
     TX --> Worker
     MKT --> Worker
     Worker --> Rate[Redis Rate Limiter]
-    Rate --> Meta[Meta Cloud API]
+    Rate --> Meta
     Meta --> WhatsApp[WhatsApp]
     Meta --> Webhook[Signed Webhook]
     Webhook --> DB
@@ -59,7 +62,9 @@ flowchart LR
     DB --> Analytics[Analytics / Operations / Metrics]
 ```
 
-Outbound HTTP requests accept and persist work quickly. Actual WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
+Outbound message requests accept and persist work quickly; WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
+
+Media upload is intentionally different: it is a bounded synchronous provider operation that writes one temporary file to disk, uploads it directly to Meta, returns the resulting media ID, and removes the temporary file in `finally`.
 
 Campaigns reuse the normal message pipeline. They cannot bypass tenant ownership, current consent, template approval, idempotency, priority routing, retries, outbox durability, or sender rate limits.
 
@@ -116,6 +121,7 @@ Current scopes:
 ```text
 messages:read
 messages:write
+media:write
 contacts:read
 contacts:write
 phone_numbers:read
@@ -142,7 +148,7 @@ GET  /api/v1/messages
 GET  /api/v1/messages/{messageId}
 ```
 
-Supported outbound types currently include:
+Supported outbound types:
 
 ```text
 TEXT
@@ -155,7 +161,7 @@ DOCUMENT
 
 Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text and media messages require an open customer-service window.
 
-Media messages accept exactly one existing Meta media `id` or an absolute HTTPS `link`. Image/video/document can carry a bounded caption; document can also carry a bounded filename. See `docs/media-messaging.md` for the full validation and storage boundary.
+Media messages accept exactly one existing Meta media `id` or an absolute HTTPS `link`. Image/video/document can carry a bounded caption; document can also carry a bounded filename. See `docs/media-messaging.md`.
 
 Outbound lifecycle:
 
@@ -166,6 +172,46 @@ QUEUED -> PROCESSING -> SUBMITTED -> SENT -> DELIVERED -> READ
 ```
 
 Clients can use `Idempotency-Key` to obtain one logical message across retries.
+
+## Media upload API
+
+```text
+POST /api/v1/media
+Content-Type: multipart/form-data
+Required scope: media:write
+```
+
+Multipart fields:
+
+```text
+file       required
+senderId   optional tenant-scoped sender UUID
+```
+
+The endpoint writes one upload to OS/container temporary storage rather than buffering the full file in the Node.js heap. It validates the multipart field set, declared MIME type and size, resolves the sender inside the authenticated tenant, uploads to Meta with that sender's credential, returns the provider media ID, and deletes the temporary file on every service exit path.
+
+Current local limits are intentionally at or below the provider limits:
+
+| Category | Accepted MIME families | Max |
+| --- | --- | ---: |
+| Image | JPEG, PNG | 5 MB |
+| Audio | AAC, MP4/M4A, MPEG/MP3, AMR, OGG | 16 MB |
+| Video | MP4, 3GPP | 16 MB |
+| Document | text, PDF, Word, Excel, PowerPoint legacy/OOXML | 100 MB |
+
+Example response:
+
+```json
+{
+  "mediaId": "<meta-media-id>",
+  "senderId": "<internal-sender-id>",
+  "category": "IMAGE",
+  "mimeType": "image/jpeg",
+  "size": 48123
+}
+```
+
+The service does not persist uploaded binaries or an asset registry in `0.17.0`. It currently validates the declared MIME and size; magic-byte inspection, malware scanning, quarantine/object storage and retention policy remain future hardening. See `docs/media-upload.md`.
 
 ## Senders and templates
 
@@ -255,11 +301,7 @@ POST /api/v1/campaigns/{campaignId}/resume
 POST /api/v1/campaigns/{campaignId}/cancel
 ```
 
-Campaigns require an approved `MARKETING` template. Audience mode must be exactly one of:
-
-- `allOptedIn=true`;
-- non-empty `contactIds`;
-- active saved `segmentId`.
+Campaigns require an approved `MARKETING` template. Audience mode must be exactly one of `allOptedIn=true`, non-empty `contactIds`, or an active saved `segmentId`.
 
 Launch runs under a row lock and repeatable-read transaction, selects currently opted-in contacts, and creates an immutable `CampaignRecipient` snapshot. Recipient processing uses leases and `FOR UPDATE SKIP LOCKED`, allowing multiple replicas and crash recovery.
 
@@ -322,56 +364,24 @@ See `docs/observability.md` and `ops/prometheus-alerts.yml`.
 
 ## Integration and load-smoke gate
 
-Release `0.14.0` added the real-infrastructure CI gate; `0.16.0` extends it with media delivery coverage.
+The real-infrastructure integration job starts PostgreSQL 17, Redis 7, and RabbitMQ 4, applies production migrations, then runs the Nest API/worker against a local Meta-compatible HTTP mock.
 
-The integration job starts:
-
-```text
-PostgreSQL 17
-Redis 7
-RabbitMQ 4
-```
-
-It then executes:
-
-```bash
-npm ci
-npm run prisma:generate
-npm run prisma:deploy
-npm run test:integration
-```
-
-The test process starts the real Nest API and outbound worker plus a local HTTP Meta-compatible mock. It proves:
+Coverage proves:
 
 ```text
-HTTP POST /messages
-  -> Message + OutboxEvent
-  -> RabbitMQ
-  -> worker
-  -> Redis rate limiter
-  -> Meta HTTP mock
-  -> provider ID persisted
-  -> SUBMITTED
+text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mock -> SUBMITTED
+multipart media upload -> temporary disk file -> tenant sender -> Meta mock /media -> mediaId
 ```
 
-Coverage includes both text and image messages. It also proves idempotency and trace persistence, then sends a default 50-message concurrent burst and requires:
+It also proves message idempotency and trace persistence, then sends a default 50-message concurrent burst and requires zero transport errors, HTTP 202 for every accept, unique internal IDs, bounded p95 acceptance, eventual `SUBMITTED`, and an exact provider delivery count.
 
-- zero transport errors;
-- HTTP 202 for every accept;
-- unique internal IDs;
-- p95 acceptance below the conservative CI smoke threshold;
-- eventual `SUBMITTED` for every accepted message;
-- exact Meta mock delivery count.
+The multipart integration test verifies provider authorization, the multipart boundary, `messaging_product=whatsapp`, the server-generated provider filename, and that the client-supplied original filename is not forwarded.
 
 This CI burst is a regression test, not a production throughput certification. Dedicated capacity and soak tests are still required for production sizing.
 
 ### Meta test seam
 
-The normal Graph host remains:
-
-```text
-https://graph.facebook.com
-```
+The normal Graph host remains `https://graph.facebook.com`.
 
 `META_GRAPH_API_BASE_URL` exists for controlled testing. HTTP overrides are accepted only under `NODE_ENV=test`; non-test environments require HTTPS. Embedded URL credentials, query strings, and fragments are rejected.
 
@@ -422,6 +432,7 @@ META_GRAPH_API_VERSION
 META_APP_SECRET
 META_WEBHOOK_VERIFY_TOKEN
 META_HTTP_TIMEOUT_MS
+META_MEDIA_UPLOAD_TIMEOUT_MS
 OUTBOUND_RETRY_DELAYS_MS
 DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND
 CAMPAIGN_MAX_RECIPIENTS
@@ -431,16 +442,16 @@ See `.env.example` for the complete documented configuration set.
 
 Never commit production credentials or access tokens.
 
-## Release metadata note
+## Version metadata
 
-Administrative audit coverage was merged in PR #16 while package/OpenAPI metadata remained at `0.14.0`. Release `0.16.0` corrects that repository metadata drift and includes the media messaging foundation; repository history is not rewritten.
+`package.json` is the runtime version source. `src/version.ts` reads it and supplies both the OpenAPI version and the `apiWhatsApp/<version>` User-Agent used by Meta clients, preventing the historical per-client version drift.
 
 ## Next implementation slices
 
 - production capacity / soak / failure-injection test expansion
 - OpenTelemetry span export and tracing-backend integration
 - provider-backed secret stores beyond environment references
-- media upload/object storage/scanning and retention
+- controlled media quarantine/object storage, content sniffing, malware scanning and retention
 - agent inbox and conversation assignment
 
 ## Repository workflow
