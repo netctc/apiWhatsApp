@@ -15,6 +15,8 @@ export enum ApiScope {
   CAMPAIGNS_WRITE = "campaigns:write",
   SEGMENTS_READ = "segments:read",
   SEGMENTS_WRITE = "segments:write",
+  CLIENT_WEBHOOKS_READ = "client_webhooks:read",
+  CLIENT_WEBHOOKS_WRITE = "client_webhooks:write",
   OPERATIONS_READ = "operations:read",
   API_KEYS_READ = "api_keys:read",
   API_KEYS_WRITE = "api_keys:write",
