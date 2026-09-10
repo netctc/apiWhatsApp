@@ -31,8 +31,8 @@ export class MessagesService {
     private readonly outboundPolicy: OutboundPolicyService,
     private readonly phoneNumbers: PhoneNumbersService,
     private readonly templates: TemplatesService,
-    @Optional() private readonly conversationActivity?: ConversationActivityService,
     @Optional() private readonly trace?: TraceContextService,
+    @Optional() private readonly conversationActivity?: ConversationActivityService,
   ) {}
 
   async create(tenantId: string, dto: CreateMessageDto) {
