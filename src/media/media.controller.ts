@@ -1,6 +1,8 @@
 import {
   Body,
   Controller,
+  Get,
+  Param,
   Post,
   UploadedFile,
   UseInterceptors,
@@ -29,7 +31,7 @@ export class MediaController {
   @RequireScopes(ApiScope.MEDIA_WRITE)
   @UseInterceptors(FileInterceptor("file"))
   @ApiConsumes("multipart/form-data")
-  @ApiOperation({ summary: "Upload one bounded media file to Meta for a tenant WhatsApp sender" })
+  @ApiOperation({ summary: "Upload one bounded media file and register the provider media asset" })
   @ApiBody({
     schema: {
       type: "object",
@@ -53,5 +55,22 @@ export class MediaController {
     @UploadedFile() file: StoredMediaUploadFile | undefined,
   ) {
     return this.media.upload(principal.tenantId, fields, file);
+  }
+
+  @Get()
+  @RequireScopes(ApiScope.MEDIA_READ)
+  @ApiOperation({ summary: "List the latest tenant media asset registry entries" })
+  list(@CurrentPrincipal() principal: ApiPrincipal) {
+    return this.media.list(principal.tenantId);
+  }
+
+  @Get(":assetId")
+  @RequireScopes(ApiScope.MEDIA_READ)
+  @ApiOperation({ summary: "Get one tenant media asset registry entry" })
+  findById(
+    @CurrentPrincipal() principal: ApiPrincipal,
+    @Param("assetId") assetId: string,
+  ) {
+    return this.media.findById(principal.tenantId, assetId);
   }
 }
