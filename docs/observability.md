@@ -1,27 +1,33 @@
 # Observability runbook
 
-Release 0.13.0 adds Prometheus-compatible metrics and W3C trace correlation without adding an observability SDK to the runtime dependency graph.
+Release 0.13.0 introduced Prometheus-compatible metrics and W3C trace correlation without adding an observability SDK to the runtime dependency graph. Current hardening adds an optional bounded OTLP/HTTP JSON trace exporter while preserving the existing public `traceparent` and queue-carrier contract.
 
 ## Scope
 
-Implemented in this release:
+Implemented:
 
 - HTTP request correlation with W3C `traceparent`;
 - bounded `x-request-id` generation/propagation;
 - trace carrier persistence in the transactional outbox;
 - trace propagation through RabbitMQ publish, retry, and dead-letter payloads;
 - trace restoration with a new worker span before outbound dispatch;
+- optional OTLP/HTTP JSON export for completed HTTP server spans and outbound worker consumer spans;
+- bounded in-process OTLP queue, batch size, schedule delay, and request timeout;
+- W3C sampled-flag enforcement before export;
 - Prometheus text metrics;
 - durable backlog/status gauges sourced from PostgreSQL;
 - baseline Prometheus alert rules.
 
-Not implemented yet:
+Not implemented in this slice:
 
-- OpenTelemetry span export;
-- distributed trace sampling/export to Jaeger, Tempo, Honeycomb, Datadog, or another backend;
+- automatic OpenTelemetry SDK instrumentation of PostgreSQL, Redis, RabbitMQ, `fetch`, or other libraries;
+- OTLP metrics or logs export;
+- producer/client child spans around outbox publication, RabbitMQ publish, Redis, or Meta HTTP calls;
+- a local probabilistic/root sampling policy beyond the existing W3C trace flags;
+- tracing-backend deployment or vendor-specific configuration for Jaeger, Tempo, Honeycomb, Datadog, etc.;
 - automated alert delivery configuration for Alertmanager/PagerDuty/Slack/etc.
 
-The W3C correlation model in this release is intentionally compatible with adding an OpenTelemetry exporter later without changing public trace headers or queue-carrier semantics.
+The exporter is deliberately non-critical telemetry. Collector unavailability, rejection, timeout, queue saturation, or invalid exporter configuration cannot make a business API request or outbound message fail.
 
 ## Trace correlation
 
@@ -75,6 +81,161 @@ The carrier contains only:
 It does not contain tenant IDs, contact IDs, phone numbers, campaign IDs, message bodies, provider payloads, or credentials.
 
 Legacy outbox and RabbitMQ jobs without trace metadata continue to process normally. Invalid optional trace metadata is ignored rather than allowed to block message delivery.
+
+## OTLP trace export
+
+Trace export is disabled unless one of these variables is configured:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+OTEL_EXPORTER_OTLP_ENDPOINT
+```
+
+The implementation supports OTLP over HTTP using JSON encoding only:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json
+```
+
+A trace-specific endpoint is used exactly as configured. When only the generic endpoint is configured, `/v1/traces` is appended to its path.
+
+Example:
+
+```text
+OTEL_SERVICE_NAME=apiWhatsApp
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otel-collector.example.net/v1/traces
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json
+OTEL_EXPORTER_OTLP_TRACES_TIMEOUT=10000
+```
+
+`http://` and `https://` collector endpoints are accepted because private cluster collectors commonly expose OTLP without TLS behind a trusted network boundary. Use HTTPS whenever telemetry or authentication headers cross an untrusted network.
+
+Embedded endpoint credentials and URL fragments are rejected. Keep collector credentials in OTLP headers instead of the URL.
+
+### Collector headers
+
+The exporter accepts the standard comma-separated header variables:
+
+```text
+OTEL_EXPORTER_OTLP_HEADERS
+OTEL_EXPORTER_OTLP_TRACES_HEADERS
+```
+
+Trace-specific headers override generic headers with the same name. Percent-encoded header values are decoded before sending.
+
+Example:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_HEADERS=authorization=Bearer%20runtime-secret
+```
+
+The application keeps transport-controlled `content-type`, `content-length`, `host`, `connection`, and `transfer-encoding` authoritative. Configured values for those names are discarded.
+
+Collector headers are runtime secrets/configuration. They are not written to PostgreSQL, application responses, span attributes, or normal exporter logs.
+
+### Bounded exporter controls
+
+Defaults:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_TIMEOUT=10000
+OTEL_BSP_MAX_QUEUE_SIZE=2048
+OTEL_BSP_MAX_EXPORT_BATCH_SIZE=512
+OTEL_BSP_SCHEDULE_DELAY=5000
+```
+
+Application-enforced ranges:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_TIMEOUT   1..60000 ms
+OTEL_BSP_MAX_QUEUE_SIZE             1..10000 spans
+OTEL_BSP_MAX_EXPORT_BATCH_SIZE      1..queue size
+OTEL_BSP_SCHEDULE_DELAY             100..60000 ms
+```
+
+A full local queue drops new spans rather than applying backpressure to API/worker processing. Collector failures drop the affected exported batch after the bounded attempt; they are not retried inside the business process. This prevents a telemetry outage from turning into an application memory/backpressure outage.
+
+During graceful module shutdown the periodic timer stops and the exporter attempts to flush the remaining bounded queue. Collector failures during that flush remain non-fatal.
+
+### Sampling behavior
+
+The exporter sends a span only when the W3C sampled bit is set in `traceFlags`.
+
+A valid inbound parent with `traceFlags=00` therefore continues correlation but does not export the server/worker spans from this exporter. A parent with `01` is export-eligible.
+
+When no valid parent exists, the current trace-context implementation creates a local root with `traceFlags=01`. This means enabling OTLP export without upstream sampling can export every instrumented local-root request. For high-volume deployments, use an upstream W3C sampling policy or size the collector accordingly. A configurable local probability sampler is a separate future hardening slice.
+
+## Exported span inventory
+
+### HTTP server
+
+Each completed Nest HTTP request can emit one `SERVER` span using the exact trace/span identity already returned through the response `traceparent`.
+
+Span name:
+
+```text
+HTTP <METHOD> <Controller>.<handler>
+```
+
+Bounded attributes:
+
+```text
+http.request.method
+http.response.status_code
+code.namespace
+code.function
+```
+
+HTTP 5xx/unhandled failures set OTLP span status to `ERROR`. 4xx responses remain application/client outcomes rather than server-span errors.
+
+Raw URL/path/query values are deliberately not exported, avoiding IDs, phone numbers, tenant slugs, search terms, or other dynamic path/query data.
+
+### Outbound worker consumer
+
+Each outbound queue attempt can emit a `CONSUMER` span after the queue trace carrier is restored.
+
+Span names:
+
+```text
+whatsapp.outbound.process
+whatsapp.outbound.retry_exhausted
+```
+
+Bounded attributes:
+
+```text
+messaging.system=rabbitmq
+messaging.operation.type=process
+app.message.traffic_class=<OTP|TRANSACTIONAL|MARKETING>
+app.queue.attempt=<bounded retry attempt>
+app.queue.result=<ack|retry|defer|dead|exhausted|exception>
+```
+
+`retry`, `dead`, `exhausted`, and thrown exceptions are exported with OTLP `ERROR` status. Dynamic exception/retry reason text is intentionally excluded.
+
+The worker span continues the existing queue carrier trace ID and uses a new span ID. No message ID is exported as a span attribute.
+
+## OTLP data-handling policy
+
+Do not add any of the following as span/resource attributes in routine instrumentation:
+
+- tenant ID / tenant slug;
+- contact ID;
+- phone number;
+- message ID / provider message ID;
+- campaign ID;
+- template ID;
+- API key ID;
+- request ID as a searchable span attribute;
+- raw request URL, path with dynamic IDs, or query string;
+- request/response/message payloads;
+- media storage key/path/bucket;
+- provider response bodies;
+- error message text;
+- user-provided strings;
+- Meta or collector credentials.
+
+Use the trace ID itself to join distributed spans. `x-request-id` remains available in HTTP/application-log correlation without being duplicated into exported span attributes.
 
 ## Metrics endpoint
 
@@ -204,7 +365,7 @@ api_whatsapp_webhook_oldest_pending_age_seconds
 
 The durable metrics are read from PostgreSQL at scrape time. This means they represent recoverable platform state rather than per-process counters that disappear when a replica restarts.
 
-## Cardinality and data-handling policy
+## Metric cardinality policy
 
 Never add any of the following as Prometheus labels:
 
@@ -249,9 +410,11 @@ At minimum graph:
 5. webhook pending/due/oldest age;
 6. message counts by current status;
 7. campaign recipient counts by orchestration status;
-8. process RSS and heap usage.
+8. process RSS and heap usage;
+9. OTLP collector accepted/dropped spans from collector-side metrics;
+10. trace latency/error views for HTTP and outbound worker spans.
 
-## Health versus metrics
+## Health versus telemetry
 
 Use health endpoints for orchestration probes:
 
@@ -260,14 +423,18 @@ GET /api/health/live
 GET /api/health/ready
 ```
 
-Use `/api/metrics` for monitoring/scraping. Do not use Prometheus scrape success as the Kubernetes liveness or readiness check.
+Use `/api/metrics` for monitoring/scraping and OTLP for trace export. Collector availability is deliberately **not** part of application readiness because telemetry must not remove a healthy messaging replica from service.
+
+Do not use Prometheus scrape or OTLP collector success as Kubernetes liveness/readiness checks.
 
 ## Security checklist
 
-- keep `METRICS_BEARER_TOKEN` in a secret manager;
-- use TLS at the ingress/service-mesh boundary;
-- restrict network access to the metrics endpoint where possible;
-- rotate the monitoring token independently of tenant credentials;
-- do not log the metrics bearer token;
-- keep the endpoint disabled when monitoring is not configured;
-- review new metric labels for cardinality and data leakage before release.
+- keep `METRICS_BEARER_TOKEN` and collector auth headers in a secret manager;
+- use TLS when metrics or traces cross an untrusted network;
+- restrict network access to metrics/collector endpoints where possible;
+- rotate monitoring/collector credentials independently of tenant credentials;
+- do not log metrics or collector bearer tokens;
+- keep OTLP disabled when trace export is not required;
+- review every new metric label and span attribute for cardinality and data leakage;
+- never export business payloads or tenant/contact/message identifiers as routine telemetry;
+- size collector ingestion and upstream sampling before enabling trace export on high-volume production traffic.
