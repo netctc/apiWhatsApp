@@ -4,20 +4,20 @@ import { PrismaService } from "../src/prisma/prisma.service.js";
 import { WebhookStatusService } from "../src/webhooks/webhook-status.service.js";
 
 describe("WebhookStatusService", () => {
-  const messageFindUnique = jest.fn();
+  const queryRaw = jest.fn();
   const messageUpdate = jest.fn();
   const statusEventCreate = jest.fn();
   const webhookUpdate = jest.fn();
 
   const transaction = jest.fn(async (callback: (client: unknown) => Promise<unknown>) =>
     callback({
+      $queryRaw: queryRaw,
       messageStatusEvent: { create: statusEventCreate },
       message: { update: messageUpdate },
     }),
   );
 
   const prisma = {
-    message: { findUnique: messageFindUnique },
     webhookEvent: { update: webhookUpdate },
     $transaction: transaction,
   } as unknown as PrismaService;
@@ -26,22 +26,27 @@ describe("WebhookStatusService", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    queryRaw.mockResolvedValue([]);
     statusEventCreate.mockResolvedValue({});
     messageUpdate.mockResolvedValue({});
     webhookUpdate.mockResolvedValue({});
   });
 
   it("advances a delivered message to read using the provider timestamp", async () => {
-    messageFindUnique.mockResolvedValue({
-      id: "7f6fd8fe-476a-4c7a-af8c-498528ecbf5a",
-      status: MessageStatus.DELIVERED,
-    });
+    queryRaw.mockResolvedValue([
+      {
+        id: "7f6fd8fe-476a-4c7a-af8c-498528ecbf5a",
+        status: MessageStatus.DELIVERED,
+      },
+    ]);
 
     await service.processWebhookEvent(
       "7ab3f1da-fd64-42e4-89b6-f028c2591306",
       deliveryPayload("wamid.test-1", "read", "1700000000"),
     );
 
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(renderSql(queryRaw.mock.calls[0]?.[0])).toContain("FOR UPDATE");
     expect(statusEventCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         status: MessageStatus.READ,
@@ -63,11 +68,13 @@ describe("WebhookStatusService", () => {
     });
   });
 
-  it("records but does not apply a delayed sent event after the message is already read", async () => {
-    messageFindUnique.mockResolvedValue({
-      id: "ac196dfc-e62c-4e5b-aeb2-29f1ff6d9095",
-      status: MessageStatus.READ,
-    });
+  it("records but does not apply a delayed sent event after the locked message is already read", async () => {
+    queryRaw.mockResolvedValue([
+      {
+        id: "ac196dfc-e62c-4e5b-aeb2-29f1ff6d9095",
+        status: MessageStatus.READ,
+      },
+    ]);
 
     await service.processWebhookEvent(
       "4351c373-6491-481a-af8b-ebfb85d7463b",
@@ -81,11 +88,13 @@ describe("WebhookStatusService", () => {
     expect(webhookUpdate).toHaveBeenCalled();
   });
 
-  it("persists Meta failure details when a submitted message fails", async () => {
-    messageFindUnique.mockResolvedValue({
-      id: "fc91b640-d290-42ad-89cc-30f76122098c",
-      status: MessageStatus.SUBMITTED,
-    });
+  it("persists Meta failure details when the locked submitted message fails", async () => {
+    queryRaw.mockResolvedValue([
+      {
+        id: "fc91b640-d290-42ad-89cc-30f76122098c",
+        status: MessageStatus.SUBMITTED,
+      },
+    ]);
 
     const payload = deliveryPayload("wamid.test-3", "failed", "1700000002", [
       {
@@ -107,7 +116,31 @@ describe("WebhookStatusService", () => {
       }),
     });
   });
+
+  it("marks an event processed when the provider message is unknown", async () => {
+    queryRaw.mockResolvedValue([]);
+
+    await service.processWebhookEvent(
+      "570ec553-2100-44d1-bb0a-8d4940858a5e",
+      deliveryPayload("wamid.unknown", "delivered", "1700000003"),
+    );
+
+    expect(statusEventCreate).not.toHaveBeenCalled();
+    expect(messageUpdate).not.toHaveBeenCalled();
+    expect(webhookUpdate).toHaveBeenCalledWith({
+      where: { id: "570ec553-2100-44d1-bb0a-8d4940858a5e" },
+      data: expect.objectContaining({ processed: true }),
+    });
+  });
 });
+
+function renderSql(value: unknown): string {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const strings = (value as { strings?: readonly string[] }).strings;
+  return strings?.join(" ") ?? "";
+}
 
 function deliveryPayload(id: string, status: string, timestamp: string, errors?: unknown[]) {
   return {
