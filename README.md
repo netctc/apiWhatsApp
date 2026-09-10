@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.17.0
+## Current release: 0.18.0
 
 Engineering language is English for source code, API contracts, tests, operational documentation, logs, and commit messages.
 
@@ -25,6 +25,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - Transactional outbox
 - Signed Meta webhook ingestion and durable asynchronous processing
 - Inbound message persistence and delivery receipt processing
+- Tenant-scoped agent inbox with conversation state, priority, assignment, unread counters, notes, and message history
 - Durable marketing campaign orchestration with immutable audience snapshots
 - Safe per-recipient template personalization
 - Live campaign orchestration and WhatsApp delivery analytics
@@ -41,9 +42,11 @@ Engineering language is English for source code, API contracts, tests, operation
 ```mermaid
 flowchart LR
     Client[CRM / ERP / Application] --> API[REST API]
+    Agent[Agent / Helpdesk Client] --> API
     API --> DB[(PostgreSQL)]
     API --> Temp[Ephemeral media file]
     Temp --> Meta[Meta Cloud API]
+    DB --> Inbox[Conversation Read Model]
     DB --> Outbox[Transactional Outbox]
     Outbox --> Router[Traffic Router]
     Router --> OTP[(RabbitMQ OTP)]
@@ -65,6 +68,8 @@ flowchart LR
 Outbound message requests accept and persist work quickly; WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
 
 Media upload is intentionally different: it is a bounded synchronous provider operation that writes one temporary file to disk, uploads it directly to Meta, returns the resulting media ID, and removes the temporary file in `finally`.
+
+The agent inbox is an operational layer over the authoritative `Message` store. Conversation rows keep assignment/state/activity data; message payloads and provider lifecycle remain on `Message`.
 
 Campaigns reuse the normal message pipeline. They cannot bypass tenant ownership, current consent, template approval, idempotency, priority routing, retries, outbox durability, or sender rate limits.
 
@@ -132,6 +137,8 @@ campaigns:read
 campaigns:write
 segments:read
 segments:write
+inbox:read
+inbox:write
 operations:read
 api_keys:read
 api_keys:write
@@ -211,7 +218,7 @@ Example response:
 }
 ```
 
-The service does not persist uploaded binaries or an asset registry in `0.17.0`. It currently validates the declared MIME and size; magic-byte inspection, malware scanning, quarantine/object storage and retention policy remain future hardening. See `docs/media-upload.md`.
+The service does not persist uploaded binaries or an asset registry in the current media-upload foundation. It validates declared MIME and size; magic-byte inspection, malware scanning, quarantine/object storage and retention policy remain future hardening. See `docs/media-upload.md`.
 
 ## Senders and templates
 
@@ -287,6 +294,39 @@ PATCH /api/v1/segments/{segmentId}
 
 Segment evaluation always adds tenant ownership and current `OPTED_IN` on the server.
 
+## Agent inbox and conversations
+
+The inbox uses the existing contact/sender/message records and adds tenant-scoped operational state. A logical conversation is unique by `tenant + sender + contact`.
+
+Agent endpoints:
+
+```text
+POST  /api/v1/inbox/agents
+GET   /api/v1/inbox/agents
+PATCH /api/v1/inbox/agents/{agentId}
+```
+
+Conversation endpoints:
+
+```text
+GET   /api/v1/inbox/conversations
+GET   /api/v1/inbox/conversations/{conversationId}
+PATCH /api/v1/inbox/conversations/{conversationId}
+POST  /api/v1/inbox/conversations/{conversationId}/read
+GET   /api/v1/inbox/conversations/{conversationId}/messages
+POST  /api/v1/inbox/conversations/{conversationId}/notes
+```
+
+Conversation states are `OPEN`, `PENDING`, and `RESOLVED`; priorities are `LOW`, `NORMAL`, `HIGH`, and `URGENT`.
+
+Inbound messages create or reopen the sender/contact conversation and increment unread state atomically with the persisted message. Duplicate provider message IDs are discarded before unread is changed, and out-of-order inbound webhooks cannot move activity timestamps backwards.
+
+Free-form outbound text/media messages reuse the same conversation and link `Message.conversationId` inside the existing Message + Outbox transaction. Template traffic deliberately does not auto-create or reopen inbox conversations, so marketing/authentication/utility templates and campaign volume do not flood the human-support queue.
+
+Agent and conversation administrative mutations are tenant-scoped and audited without copying agent identity values, message content, notes, or contact data into audit metadata. Internal note content lives only in `ConversationNote`.
+
+See `docs/inbox.md` for concurrency semantics, assignment behavior, integration coverage, and deliberate foundation boundaries.
+
 ## Campaigns
 
 ```text
@@ -329,7 +369,7 @@ Processing path:
 verify signature -> persist raw event -> HTTP 200 -> process asynchronously
 ```
 
-The durable processor handles inbound messages, delivery receipts, and template lifecycle updates.
+The durable processor handles inbound messages, delivery receipts, and template lifecycle updates. Inbound message processing also updates the agent-inbox conversation in the same transaction as message persistence.
 
 ## Health, metrics, and trace correlation
 
@@ -364,18 +404,25 @@ See `docs/observability.md` and `ops/prometheus-alerts.yml`.
 
 ## Integration and load-smoke gate
 
-The real-infrastructure integration job starts PostgreSQL 17, Redis 7, and RabbitMQ 4, applies production migrations, then runs the Nest API/worker against a local Meta-compatible HTTP mock.
+The real-infrastructure integration job starts PostgreSQL 17, Redis 7, and RabbitMQ 4, applies production migrations, then runs the Nest API/worker against controlled test seams.
 
-Coverage proves:
+Core coverage proves:
 
 ```text
 text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mock -> SUBMITTED
 multipart media upload -> temporary disk file -> tenant sender -> Meta mock /media -> mediaId
 ```
 
-It also proves message idempotency and trace persistence, then sends a default 50-message concurrent burst and requires zero transport errors, HTTP 202 for every accept, unique internal IDs, bounded p95 acceptance, eventual `SUBMITTED`, and an exact provider delivery count.
+Inbox coverage proves:
 
-The multipart integration test verifies provider authorization, the multipart boundary, `messaging_product=whatsapp`, the server-generated provider filename, and that the client-supplied original filename is not forwarded.
+```text
+signed Meta webhook -> WebhookEvent -> inbound processor -> Contact + Conversation + Message
+conversation -> mark read -> agent assignment -> priority/state -> note -> resolve
+later inbound -> same conversation reopened + unread
+free-form outbound -> same conversationId + transactional outbox
+```
+
+The integration gate also proves message idempotency and trace persistence, then sends a default 50-message concurrent burst and requires zero transport errors, HTTP 202 for every accept, unique internal IDs, bounded p95 acceptance, eventual `SUBMITTED`, and an exact provider delivery count.
 
 This CI burst is a regression test, not a production throughput certification. Dedicated capacity and soak tests are still required for production sizing.
 
@@ -444,7 +491,7 @@ Never commit production credentials or access tokens.
 
 ## Version metadata
 
-`package.json` is the runtime version source. `src/version.ts` reads it and supplies both the OpenAPI version and the `apiWhatsApp/<version>` User-Agent used by Meta clients, preventing the historical per-client version drift.
+`package.json` is the runtime version source. `src/version.ts` reads it and supplies both the OpenAPI version and the `apiWhatsApp/<version>` User-Agent used by Meta clients, preventing per-client version drift.
 
 ## Next implementation slices
 
@@ -452,7 +499,8 @@ Never commit production credentials or access tokens.
 - OpenTelemetry span export and tracing-backend integration
 - provider-backed secret stores beyond environment references
 - controlled media quarantine/object storage, content sniffing, malware scanning and retention
-- agent inbox and conversation assignment
+- realtime inbox delivery (SSE/WebSocket), teams/skills, routing policies, SLA/escalation and human-agent session/SSO integration
+- optional inbox frontend application
 
 ## Repository workflow
 
