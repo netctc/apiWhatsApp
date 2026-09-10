@@ -5,10 +5,13 @@ import {
   OnModuleDestroy,
   Optional,
 } from "@nestjs/common";
+import { performance } from "node:perf_hooks";
 import { MessageTrafficClass, OutboxEvent, Prisma } from "../generated/prisma/client.js";
+import { OtlpTraceExporterService } from "../observability/otlp-trace-exporter.service.js";
 import {
   TraceContextService,
   type TraceCarrier,
+  type TraceContext,
 } from "../observability/trace-context.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { MessagingQueueService } from "../queue/messaging-queue.service.js";
@@ -25,6 +28,7 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
     private readonly prisma: PrismaService,
     private readonly queue: MessagingQueueService,
     @Optional() private readonly traceContext?: TraceContextService,
+    @Optional() private readonly otlp?: OtlpTraceExporterService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -106,12 +110,11 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
         );
       }
 
-      const trace = this.extractTrace(payload);
-      if (trace) {
-        await this.queue.publishOutboundMessage(messageId, persistedTrafficClass, trace);
-      } else {
-        await this.queue.publishOutboundMessage(messageId, persistedTrafficClass);
-      }
+      await this.publishOutboundMessage(
+        messageId,
+        persistedTrafficClass,
+        this.extractTrace(payload),
+      );
 
       await this.prisma.outboxEvent.update({
         where: { id: eventId },
@@ -136,6 +139,76 @@ export class OutboxPublisherService implements OnApplicationBootstrap, OnModuleD
 
       this.logger.warn(`Failed to publish outbox event ${eventId}: ${message}`);
     }
+  }
+
+  private async publishOutboundMessage(
+    messageId: string,
+    trafficClass: MessageTrafficClass,
+    trace: TraceCarrier | undefined,
+  ): Promise<void> {
+    if (!trace || !this.traceContext) {
+      await this.queue.publishOutboundMessage(messageId, trafficClass);
+      return;
+    }
+
+    await this.traceContext.runFromParent(trace, async () => {
+      const context = this.traceContext?.current();
+      const producerCarrier = this.traceContext?.carrier();
+      const startedAtUnixNano = BigInt(Date.now()) * 1_000_000n;
+      const startedAt = performance.now();
+
+      try {
+        await this.queue.publishOutboundMessage(messageId, trafficClass, producerCarrier);
+        this.recordProducerSpan(
+          context,
+          trafficClass,
+          startedAtUnixNano,
+          startedAt,
+          "success",
+          0,
+        );
+      } catch (error) {
+        this.recordProducerSpan(
+          context,
+          trafficClass,
+          startedAtUnixNano,
+          startedAt,
+          "error",
+          2,
+        );
+        throw error;
+      }
+    });
+  }
+
+  private recordProducerSpan(
+    context: TraceContext | undefined,
+    trafficClass: MessageTrafficClass,
+    startedAtUnixNano: bigint,
+    startedAt: number,
+    result: "success" | "error",
+    statusCode: 0 | 2,
+  ): void {
+    if (!context) {
+      return;
+    }
+    const durationNano = BigInt(
+      Math.max(0, Math.round((performance.now() - startedAt) * 1_000_000)),
+    );
+    this.otlp?.recordSpan({
+      context,
+      name: "rabbitmq publish whatsapp.outbound",
+      kind: 4,
+      startTimeUnixNano: startedAtUnixNano,
+      endTimeUnixNano: startedAtUnixNano + durationNano,
+      attributes: {
+        "messaging.system": "rabbitmq",
+        "messaging.operation.type": "publish",
+        "app.message.traffic_class": trafficClass,
+        "app.outbox.result": result,
+      },
+      statusCode,
+    });
   }
 
   private extractMessageId(payload: unknown): string | undefined {
