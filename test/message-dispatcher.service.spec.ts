@@ -194,7 +194,10 @@ describe("MessageDispatcherService", () => {
         statusCode: 0,
       }),
     );
-    const exported = JSON.stringify(recordSpan.mock.calls[0]?.[0]);
+    const exported = JSON.stringify(
+      recordSpan.mock.calls[0]?.[0],
+      (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value),
+    );
     expect(exported).not.toContain(message.id);
     expect(exported).not.toContain(message.to);
     expect(exported).not.toContain("Order confirmed");
