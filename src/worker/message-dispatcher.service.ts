@@ -1,6 +1,6 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
 import { performance } from "node:perf_hooks";
-import { Message, MessageStatus, Prisma } from "../generated/prisma/client.js";
+import { Message, MessageStatus, MessageTrafficClass, Prisma } from "../generated/prisma/client.js";
 import { MetaApiError } from "../meta/meta-api.error.js";
 import {
   MetaSenderResolverService,
@@ -10,7 +10,10 @@ import {
   MetaWhatsAppClient,
   type MetaSendMessageResult,
 } from "../meta/meta-whatsapp.client.js";
-import { OtlpTraceExporterService } from "../observability/otlp-trace-exporter.service.js";
+import {
+  OtlpTraceExporterService,
+  type OtlpAttributeValue,
+} from "../observability/otlp-trace-exporter.service.js";
 import {
   TraceContextService,
   type TraceContext,
@@ -29,6 +32,8 @@ const TERMINAL_OR_SUBMITTED_STATUSES = new Set<MessageStatus>([
   MessageStatus.EXPIRED,
 ]);
 
+type ClientSpanStatusCode = 0 | 2;
+
 @Injectable()
 export class MessageDispatcherService {
   private readonly logger = new Logger(MessageDispatcherService.name);
@@ -43,7 +48,7 @@ export class MessageDispatcherService {
   ) {}
 
   async dispatch(job: OutboundQueueJob): Promise<QueueProcessingResult> {
-    const claim = await this.claimMessage(job.messageId);
+    const claim = await this.claimMessageWithTrace(job.messageId);
     if (!claim.claimed) {
       if (!claim.message) {
         this.logger.warn(`Ignoring queue job for missing message ${job.messageId}`);
@@ -91,7 +96,7 @@ export class MessageDispatcherService {
     }
 
     try {
-      await this.rateLimiter.waitForOutboundSlot(
+      await this.waitForOutboundSlotWithTrace(
         sender.phoneNumberId,
         message.trafficClass,
         sender.rateLimitPerSecond,
@@ -163,6 +168,108 @@ export class MessageDispatcherService {
     );
   }
 
+  private async claimMessageWithTrace(
+    messageId: string,
+  ): Promise<{ claimed: boolean; message: Message | null }> {
+    return this.runClientSpan(
+      "postgresql claim outbound_message",
+      {
+        "db.system.name": "postgresql",
+        "app.operation": "claim_outbound_message",
+      },
+      () => this.claimMessage(messageId),
+      (result) => ({
+        "app.datastore.result": result.claimed
+          ? "claimed"
+          : result.message
+            ? "not_claimed"
+            : "missing",
+      }),
+    );
+  }
+
+  private async waitForOutboundSlotWithTrace(
+    phoneNumberId: string,
+    trafficClass: MessageTrafficClass,
+    rateLimitPerSecond?: number,
+  ): Promise<void> {
+    await this.runClientSpan(
+      "redis reserve outbound_slot",
+      {
+        "db.system.name": "redis",
+        "app.operation": "reserve_outbound_slot",
+        "app.message.traffic_class": trafficClass,
+      },
+      () => this.rateLimiter.waitForOutboundSlot(phoneNumberId, trafficClass, rateLimitPerSecond),
+      () => ({ "app.datastore.result": "success" }),
+    );
+  }
+
+  private async runClientSpan<T>(
+    name: string,
+    attributes: Record<string, OtlpAttributeValue>,
+    operation: () => Promise<T>,
+    completedAttributes: (result: T) => Record<string, OtlpAttributeValue>,
+  ): Promise<T> {
+    const parent = this.traceContext?.carrier();
+    if (!parent || !this.traceContext) {
+      return operation();
+    }
+
+    return this.traceContext.runFromParent(parent, async () => {
+      const context = this.traceContext?.current();
+      const startedAtUnixNano = BigInt(Date.now()) * 1_000_000n;
+      const startedAt = performance.now();
+      try {
+        const result = await operation();
+        this.recordClientSpan(
+          context,
+          name,
+          startedAtUnixNano,
+          startedAt,
+          { ...attributes, ...completedAttributes(result) },
+          0,
+        );
+        return result;
+      } catch (error) {
+        this.recordClientSpan(
+          context,
+          name,
+          startedAtUnixNano,
+          startedAt,
+          { ...attributes, "app.datastore.result": "error" },
+          2,
+        );
+        throw error;
+      }
+    });
+  }
+
+  private recordClientSpan(
+    context: TraceContext | undefined,
+    name: string,
+    startedAtUnixNano: bigint,
+    startedAt: number,
+    attributes: Record<string, OtlpAttributeValue>,
+    statusCode: ClientSpanStatusCode,
+  ): void {
+    if (!context) {
+      return;
+    }
+    const durationNano = BigInt(
+      Math.max(0, Math.round((performance.now() - startedAt) * 1_000_000)),
+    );
+    this.otlp?.recordSpan({
+      context,
+      name,
+      kind: 3,
+      startTimeUnixNano: startedAtUnixNano,
+      endTimeUnixNano: startedAtUnixNano + durationNano,
+      attributes,
+      statusCode,
+    });
+  }
+
   private async sendToMeta(
     message: Message,
     sender: MetaSenderContext,
@@ -211,7 +318,7 @@ export class MessageDispatcherService {
     startedAt: number,
     result: "success" | "retryable_error" | "permanent_error" | "exception",
     httpStatus: number | undefined,
-    statusCode: 0 | 2,
+    statusCode: ClientSpanStatusCode,
   ): void {
     if (!context) {
       return;

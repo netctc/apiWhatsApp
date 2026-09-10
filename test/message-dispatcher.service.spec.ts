@@ -130,7 +130,7 @@ describe("MessageDispatcherService", () => {
     });
   });
 
-  it("creates a Meta client child span inside an active worker trace", async () => {
+  it("creates PostgreSQL, Redis, and Meta client child spans inside an active worker trace", async () => {
     const message = claimedMessage();
     const sender = {
       internalSenderId: message.senderId,
@@ -138,11 +138,19 @@ describe("MessageDispatcherService", () => {
       accessToken: "test-token",
       rateLimitPerSecond: 75,
     };
-    messageUpdateMany.mockResolvedValue({ count: 1 });
+    let claimTrace: ReturnType<TraceContextService["current"]>;
+    let redisTrace: ReturnType<TraceContextService["current"]>;
+    let metaTrace: ReturnType<TraceContextService["current"]>;
+
+    messageUpdateMany.mockImplementation(async () => {
+      claimTrace = trace.current();
+      return { count: 1 };
+    });
     messageFindUnique.mockResolvedValue(message);
     resolveSender.mockResolvedValue(sender);
-
-    let metaTrace: ReturnType<TraceContextService["current"]>;
+    waitForOutboundSlot.mockImplementation(async () => {
+      redisTrace = trace.current();
+    });
     metaSendMessage.mockImplementation(async () => {
       metaTrace = trace.current();
       return {
@@ -167,18 +175,48 @@ describe("MessageDispatcherService", () => {
     );
 
     expect(result).toEqual({ action: "ack" });
-    expect(metaTrace).toEqual(
+    for (const child of [claimTrace, redisTrace, metaTrace]) {
+      expect(child).toEqual(
+        expect.objectContaining({
+          traceId: workerContext.traceId,
+          spanId: expect.stringMatching(/^[0-9a-f]{16}$/),
+          parentSpanId: workerContext.spanId,
+          traceFlags: workerContext.traceFlags,
+          requestId: workerContext.requestId,
+        }),
+      );
+      expect(child?.spanId).not.toBe(workerContext.spanId);
+    }
+    expect(new Set([claimTrace?.spanId, redisTrace?.spanId, metaTrace?.spanId]).size).toBe(3);
+
+    expect(recordSpan).toHaveBeenCalledTimes(3);
+    expect(recordSpan).toHaveBeenCalledWith(
       expect.objectContaining({
-        traceId: workerContext.traceId,
-        spanId: expect.stringMatching(/^[0-9a-f]{16}$/),
-        parentSpanId: workerContext.spanId,
-        traceFlags: workerContext.traceFlags,
-        requestId: workerContext.requestId,
+        context: claimTrace,
+        name: "postgresql claim outbound_message",
+        kind: 3,
+        attributes: {
+          "db.system.name": "postgresql",
+          "app.operation": "claim_outbound_message",
+          "app.datastore.result": "claimed",
+        },
+        statusCode: 0,
       }),
     );
-    expect(metaTrace?.spanId).not.toBe(workerContext.spanId);
-
-    expect(recordSpan).toHaveBeenCalledTimes(1);
+    expect(recordSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: redisTrace,
+        name: "redis reserve outbound_slot",
+        kind: 3,
+        attributes: {
+          "db.system.name": "redis",
+          "app.operation": "reserve_outbound_slot",
+          "app.message.traffic_class": MessageTrafficClass.TRANSACTIONAL,
+          "app.datastore.result": "success",
+        },
+        statusCode: 0,
+      }),
+    );
     expect(recordSpan).toHaveBeenCalledWith(
       expect.objectContaining({
         context: metaTrace,
@@ -194,13 +232,57 @@ describe("MessageDispatcherService", () => {
         statusCode: 0,
       }),
     );
+
     const exported = JSON.stringify(
-      recordSpan.mock.calls[0]?.[0],
+      recordSpan.mock.calls.map((call) => call[0]),
       (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value),
     );
     expect(exported).not.toContain(message.id);
     expect(exported).not.toContain(message.to);
     expect(exported).not.toContain("Order confirmed");
+    expect(exported).not.toContain(sender.phoneNumberId);
+  });
+
+  it("marks the Redis child span as an error without changing retry behavior", async () => {
+    const message = claimedMessage();
+    messageUpdateMany.mockResolvedValue({ count: 1 });
+    messageFindUnique.mockResolvedValue(message);
+    waitForOutboundSlot.mockRejectedValue(new Error("redis unavailable"));
+
+    const workerContext = {
+      requestId: "req-rate-limit-error",
+      traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+      spanId: "3333333333333333",
+      traceFlags: "01",
+    };
+    const result = await trace.run(workerContext, () =>
+      service.dispatch({
+        messageId: message.id,
+        attempt: 1,
+        trafficClass: MessageTrafficClass.TRANSACTIONAL,
+      }),
+    );
+
+    expect(result).toEqual({ action: "retry", reason: "redis unavailable" });
+    expect(metaSendMessage).not.toHaveBeenCalled();
+    expect(recordSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "redis reserve outbound_slot",
+        kind: 3,
+        attributes: {
+          "db.system.name": "redis",
+          "app.operation": "reserve_outbound_slot",
+          "app.message.traffic_class": MessageTrafficClass.TRANSACTIONAL,
+          "app.datastore.result": "error",
+        },
+        statusCode: 2,
+      }),
+    );
+    const exported = JSON.stringify(
+      recordSpan.mock.calls.map((call) => call[0]),
+      (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value),
+    );
+    expect(exported).not.toContain("redis unavailable");
   });
 
   it("dead-letters a job whose queue class does not match the persisted message", async () => {
@@ -230,7 +312,6 @@ describe("MessageDispatcherService", () => {
     expect(resolveSender).not.toHaveBeenCalled();
     expect(waitForOutboundSlot).not.toHaveBeenCalled();
     expect(metaSendMessage).not.toHaveBeenCalled();
-    expect(recordSpan).not.toHaveBeenCalled();
   });
 
   function claimedMessage() {
