@@ -41,15 +41,27 @@ describe("OperationsService", () => {
       { status: CampaignRecipientStatus.PENDING, _count: { _all: 7 } },
       { status: CampaignRecipientStatus.QUEUED, _count: { _all: 12 } },
     ]);
-    queryRaw.mockResolvedValue([
-      {
-        pending: 3,
-        due: 2,
-        leased: 1,
-        withErrors: 1,
-        oldestPendingAgeSeconds: 45,
-      },
-    ]);
+    queryRaw
+      .mockResolvedValueOnce([
+        {
+          pending: 3,
+          due: 2,
+          leased: 1,
+          withErrors: 1,
+          oldestPendingAgeSeconds: 45,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          total: 8,
+          providerUploaded: 6,
+          failed: 2,
+          expired: 1,
+          retainedBinaries: 5,
+          retainedBytes: 245760,
+          expiringWithin24Hours: 3,
+        },
+      ]);
   });
 
   it("aggregates only the authenticated tenant operational state", async () => {
@@ -71,7 +83,7 @@ describe("OperationsService", () => {
     expect(recipientGroupBy).toHaveBeenCalledWith(
       expect.objectContaining({ where: { campaign: { tenantId: TENANT_ID } } }),
     );
-    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(queryRaw).toHaveBeenCalledTimes(2);
 
     expect(snapshot.messages.total).toBe(10);
     expect(snapshot.messages.byStatus.QUEUED).toBe(4);
@@ -88,6 +100,15 @@ describe("OperationsService", () => {
       leased: 1,
       withErrors: 1,
       oldestPendingAgeSeconds: 45,
+    });
+    expect(snapshot.mediaAssets).toEqual({
+      total: 8,
+      providerUploaded: 6,
+      failed: 2,
+      expired: 1,
+      retainedBinaries: 5,
+      retainedBytes: 245760,
+      expiringWithin24Hours: 3,
     });
     expect(Number.isNaN(Date.parse(snapshot.generatedAt))).toBe(false);
   });
