@@ -261,10 +261,11 @@ describe("campaign and webhook burst integration", () => {
 
         await readRawBody(req);
         providerCalls += 1;
+        const providerCall = providerCalls;
         await new Promise((resolve) => setTimeout(resolve, 10));
         res.statusCode = 200;
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ messages: [{ id: `wamid.campaign-burst.out.${providerCalls}` }] }));
+        res.end(JSON.stringify({ messages: [{ id: `wamid.campaign-burst.out.${providerCall}` }] }));
       } catch (error) {
         res.statusCode = 500;
         res.setHeader("content-type", "application/json");
