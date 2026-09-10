@@ -18,3 +18,5 @@ Readiness evaluates current capacity (`requiredBytes=0`). Admission evaluates pr
 The admission preflight cannot eliminate filesystem races: another replica or process can consume capacity after the check. The exclusive streaming filesystem write remains the final backstop and maps storage failures into the existing bounded `STORAGE_ERROR` lifecycle after registry reservation.
 
 When binary retention is disabled, admission performs no filesystem capacity I/O and preserves the existing ephemeral upload path.
+
+S3-compatible retention does not use this local capacity projection. The application validates S3 configuration and bucket readiness separately, while quota/capacity enforcement remains an object-store/operator responsibility. The upload path therefore does not invent a local free-space value for S3.
