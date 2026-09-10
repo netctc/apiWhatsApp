@@ -222,6 +222,22 @@ The proxy is then switched to forward TCP traffic to the real Redis service. The
 
 This proves a temporary Redis outage blocks provider traffic safely, preserves the logical message for retry, and recovers without restarting the worker or duplicating a Meta submission.
 
+## API restart before outbox publication
+
+The process-recovery gate starts an API instance with a deliberately long outbox polling interval, lets its initial empty bootstrap flush finish, and then accepts a message. The HTTP response is returned only after PostgreSQL has atomically committed the `Message` and `OutboxEvent`, but the test stops that API instance before its next outbox poll.
+
+Before the accepting instance stops, the suite requires:
+
+- the message to be durably `QUEUED`;
+- the associated outbox event to exist with `publishedAt = null`;
+- `attempts = 0`, proving publication has not started;
+- no outbox processing lease;
+- zero Meta provider calls.
+
+A fresh API instance is then started against the same database with the normal fast test polling interval, together with the real worker. Its bootstrap outbox flush must discover and publish the pre-existing event, after which the normal RabbitMQ -> Redis -> Meta path submits the original logical message exactly once.
+
+The final state requires one outbox publication attempt, `SUBMITTED`, one provider message ID, and exactly one Meta call. This proves accepted work survives the lifetime of the API process even when the process stops in the post-commit/pre-publish window.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -263,10 +279,9 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, and Redis rate-limiter recovery. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, Redis rate-limiter recovery, and recovery across the API post-commit/pre-publish restart window. Further failure-injection suites should be added incrementally for:
 
 - worker termination while a processing lease is active;
-- API termination after DB commit but before outbox publish;
 - webhook burst while campaigns are running.
 
 ## Local execution example
