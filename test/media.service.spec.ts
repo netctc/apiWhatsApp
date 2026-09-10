@@ -41,7 +41,7 @@ describe("MediaService", () => {
   it("uploads through the tenant-scoped sender and removes the temporary file", async () => {
     const temp = await createTempFile();
     try {
-      const result = await service.upload(TENANT_ID, SENDER_ID, {
+      const result = await service.upload(TENANT_ID, { senderId: SENDER_ID }, {
         path: temp.filePath,
         mimetype: "image/jpeg",
         size: temp.size,
@@ -79,7 +79,7 @@ describe("MediaService", () => {
 
     try {
       await expect(
-        service.upload(TENANT_ID, SENDER_ID, {
+        service.upload(TENANT_ID, { senderId: SENDER_ID }, {
           path: temp.filePath,
           mimetype: "image/jpeg",
           size: temp.size,
@@ -96,7 +96,7 @@ describe("MediaService", () => {
     const temp = await createTempFile(Buffer.from("zip"));
     try {
       await expect(
-        service.upload(TENANT_ID, undefined, {
+        service.upload(TENANT_ID, {}, {
           path: temp.filePath,
           mimetype: "application/zip",
           size: temp.size,
@@ -115,7 +115,7 @@ describe("MediaService", () => {
     const temp = await createTempFile();
     try {
       await expect(
-        service.upload(TENANT_ID, "not-a-uuid", {
+        service.upload(TENANT_ID, { senderId: "not-a-uuid" }, {
           path: temp.filePath,
           mimetype: "image/jpeg",
           size: temp.size,
@@ -123,6 +123,25 @@ describe("MediaService", () => {
       ).rejects.toBeInstanceOf(BadRequestException);
 
       expect(resolveForTenant).not.toHaveBeenCalled();
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on unexpected multipart fields and still cleans up", async () => {
+    const temp = await createTempFile();
+    try {
+      await expect(
+        service.upload(TENANT_ID, { senderId: SENDER_ID, tenantId: "attacker-tenant" }, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(resolveForTenant).not.toHaveBeenCalled();
+      expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
