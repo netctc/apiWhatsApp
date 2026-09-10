@@ -4,9 +4,10 @@ import { MetaSenderResolverService } from "../src/meta/meta-sender-resolver.serv
 describe("MetaSenderResolverService", () => {
   const configGet = jest.fn();
   const findActiveById = jest.fn();
+  const resolveForTenant = jest.fn();
   const service = new MetaSenderResolverService(
     { get: configGet } as never,
-    { findActiveById } as never,
+    { findActiveById, resolveForTenant } as never,
   );
 
   beforeEach(() => {
@@ -30,6 +31,27 @@ describe("MetaSenderResolverService", () => {
       accessToken: "tenant-token",
       rateLimitPerSecond: 80,
     });
+  });
+
+  it("resolves interactive provider access only through tenant ownership", async () => {
+    resolveForTenant.mockResolvedValue({
+      id: "sender-tenant-1",
+      providerPhoneNumberId: "27681414235104944",
+      credentialRef: "env:META_ACME_WHATSAPP_TOKEN",
+      rateLimitPerSecond: 75,
+    });
+    configGet.mockImplementation((name: string) =>
+      name === "META_ACME_WHATSAPP_TOKEN" ? "tenant-token" : undefined,
+    );
+
+    await expect(service.resolveForTenant("tenant-1", "sender-tenant-1")).resolves.toEqual({
+      internalSenderId: "sender-tenant-1",
+      phoneNumberId: "27681414235104944",
+      accessToken: "tenant-token",
+      rateLimitPerSecond: 75,
+    });
+    expect(resolveForTenant).toHaveBeenCalledWith("tenant-1", "sender-tenant-1");
+    expect(findActiveById).not.toHaveBeenCalled();
   });
 
   it("keeps the global Meta credentials as a legacy fallback for messages without senderId", async () => {
