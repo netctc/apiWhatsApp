@@ -7,6 +7,7 @@ describe("OutboxPublisherService traffic routing", () => {
   const messageFindUnique = jest.fn();
   const outboxUpdate = jest.fn();
   const publishOutboundMessage = jest.fn();
+  const recordSpan = jest.fn();
   const traceContext = new TraceContextService();
 
   const service = new OutboxPublisherService(
@@ -16,6 +17,7 @@ describe("OutboxPublisherService traffic routing", () => {
     } as never,
     { publishOutboundMessage } as never,
     traceContext,
+    { recordSpan } as never,
   );
 
   const privateService = service as unknown as {
@@ -46,6 +48,7 @@ describe("OutboxPublisherService traffic routing", () => {
     );
 
     expect(publishOutboundMessage).toHaveBeenCalledWith("message-1", MessageTrafficClass.OTP);
+    expect(recordSpan).not.toHaveBeenCalled();
     expect(outboxUpdate).toHaveBeenCalledWith({
       where: { id: "event-1" },
       data: expect.objectContaining({
@@ -55,7 +58,7 @@ describe("OutboxPublisherService traffic routing", () => {
     });
   });
 
-  it("passes a valid persisted trace carrier into the queue publisher", async () => {
+  it("creates a producer child span and passes that child as the queue carrier", async () => {
     messageFindUnique.mockResolvedValue({ trafficClass: MessageTrafficClass.TRANSACTIONAL });
     const trace = {
       traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
@@ -76,10 +79,40 @@ describe("OutboxPublisherService traffic routing", () => {
       1,
     );
 
-    expect(publishOutboundMessage).toHaveBeenCalledWith(
-      "message-trace",
-      MessageTrafficClass.TRANSACTIONAL,
-      trace,
+    expect(publishOutboundMessage).toHaveBeenCalledTimes(1);
+    const queueCarrier = publishOutboundMessage.mock.calls[0]?.[2] as {
+      traceId: string;
+      parentSpanId: string;
+      traceFlags: string;
+      requestId: string;
+    };
+    expect(queueCarrier).toEqual({
+      traceId: trace.traceId,
+      parentSpanId: expect.stringMatching(/^[0-9a-f]{16}$/),
+      traceFlags: trace.traceFlags,
+      requestId: trace.requestId,
+    });
+    expect(queueCarrier.parentSpanId).not.toBe(trace.parentSpanId);
+
+    expect(recordSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({
+          traceId: trace.traceId,
+          spanId: queueCarrier.parentSpanId,
+          parentSpanId: trace.parentSpanId,
+          traceFlags: trace.traceFlags,
+          requestId: trace.requestId,
+        }),
+        name: "rabbitmq publish whatsapp.outbound",
+        kind: 4,
+        attributes: {
+          "messaging.system": "rabbitmq",
+          "messaging.operation.type": "publish",
+          "app.message.traffic_class": MessageTrafficClass.TRANSACTIONAL,
+          "app.outbox.result": "success",
+        },
+        statusCode: 0,
+      }),
     );
   });
 
@@ -101,6 +134,45 @@ describe("OutboxPublisherService traffic routing", () => {
       "message-invalid-trace",
       MessageTrafficClass.TRANSACTIONAL,
     );
+    expect(recordSpan).not.toHaveBeenCalled();
+  });
+
+  it("records a failed producer span while preserving normal outbox retry behavior", async () => {
+    messageFindUnique.mockResolvedValue({ trafficClass: MessageTrafficClass.OTP });
+    publishOutboundMessage.mockRejectedValueOnce(new Error("rabbit unavailable"));
+
+    await privateService.publish(
+      "event-producer-failure",
+      "message.outbound.requested",
+      "message-producer-failure",
+      {
+        messageId: "message-producer-failure",
+        trafficClass: MessageTrafficClass.OTP,
+        trace: {
+          traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+          parentSpanId: "00f067aa0ba902b7",
+          traceFlags: "01",
+          requestId: "req-456",
+        },
+      },
+      1,
+    );
+
+    expect(recordSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "rabbitmq publish whatsapp.outbound",
+        kind: 4,
+        attributes: expect.objectContaining({ "app.outbox.result": "error" }),
+        statusCode: 2,
+      }),
+    );
+    expect(outboxUpdate).toHaveBeenCalledWith({
+      where: { id: "event-producer-failure" },
+      data: expect.objectContaining({
+        lastError: "rabbit unavailable",
+        processingLeaseUntil: null,
+      }),
+    });
   });
 
   it("does not publish when outbox JSON disagrees with the persisted class", async () => {
