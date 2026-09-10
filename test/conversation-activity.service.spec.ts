@@ -75,7 +75,8 @@ describe("ConversationActivityService", () => {
     });
     expect(queryRaw).toHaveBeenCalledTimes(1);
 
-    const renderedSql = String(queryRaw.mock.calls[0]?.[0]);
+    const statement = queryRaw.mock.calls[0]?.[0] as { strings?: readonly string[] } | undefined;
+    const renderedSql = statement?.strings?.join(" ") ?? "";
     expect(renderedSql).toContain("ON CONFLICT");
     expect(renderedSql).toContain("GREATEST");
   });
