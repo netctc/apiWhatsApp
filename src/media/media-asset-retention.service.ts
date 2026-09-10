@@ -65,9 +65,9 @@ export class MediaAssetRetentionService implements OnApplicationBootstrap, OnMod
     for (const asset of assets) {
       try {
         await this.binaryStorage.discard(asset.storageMode, asset.storageKey);
-      } catch (error) {
+      } catch {
         this.logger.error(
-          `Unable to remove expired media binary asset=${asset.id} mode=${asset.storageMode}: ${error instanceof Error ? error.message : String(error)}`,
+          `Unable to remove expired media binary asset=${asset.id} mode=${asset.storageMode}`,
         );
         continue;
       }
