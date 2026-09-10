@@ -142,6 +142,38 @@ The permanent-error scenario injects a non-retryable Meta HTTP 400 response and 
 
 These tests verify the runtime retry/DLQ contract rather than only testing retry classification in isolation.
 
+## Bounded retry exhaustion
+
+A separate real-infrastructure scenario keeps returning retryable HTTP 503 responses until the configured retry policy is exhausted. With two short test-only retry delays, the suite requires exactly three provider attempts: the initial delivery plus two retries.
+
+After the final retryable failure it requires:
+
+- persisted `FAILED` state;
+- error code `RETRY_EXHAUSTED`;
+- no provider message ID;
+- exactly three `PROCESSING` lifecycle entries;
+- publication to the real transactional DLQ;
+- no fourth provider attempt after the final retry queue has drained.
+
+This proves retryable provider failures remain bounded and cannot loop indefinitely.
+
+## Duplicate RabbitMQ delivery
+
+The integration gate deliberately publishes a duplicate outbound queue job while the original logical message is already leased by a worker and blocked inside the Meta test double.
+
+The duplicate must not obtain a second processing lease. It is routed through the bounded retry path while the original delivery remains in `PROCESSING`; after the original provider request succeeds, the delayed duplicate is consumed and acknowledged as already submitted.
+
+The suite requires:
+
+- one logical `Message` record;
+- one successful processing claim and `attemptCount=1`;
+- one `PROCESSING` lifecycle entry;
+- exactly one Meta provider request;
+- a provider message ID from that single request;
+- the duplicate retry queue to drain without another provider call.
+
+This exercises at-least-once RabbitMQ delivery behavior and proves an active processing lease prevents concurrent duplicate provider sends.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -183,13 +215,12 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves both the normal durable path and Meta transient/permanent failure handling. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, and duplicate RabbitMQ delivery protection. Further failure-injection suites should be added incrementally for:
 
 - RabbitMQ unavailable during outbox publication;
 - Redis unavailable during outbound rate limiting;
 - worker termination while a processing lease is active;
 - API termination after DB commit but before outbox publish;
-- duplicated RabbitMQ deliveries;
 - delayed/out-of-order delivery webhooks;
 - webhook burst while campaigns are running.
 
