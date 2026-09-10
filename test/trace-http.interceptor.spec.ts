@@ -5,12 +5,19 @@ import { TraceHttpInterceptor } from "../src/observability/trace-http.intercepto
 
 describe("TraceHttpInterceptor", () => {
   const trace = new TraceContextService();
-  const interceptor = new TraceHttpInterceptor(trace);
+  const recordSpan = jest.fn();
+  const interceptor = new TraceHttpInterceptor(trace, { recordSpan } as never);
 
-  it("continues the incoming trace while the Nest handler executes", async () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("continues the incoming trace and exports the same server span context", async () => {
     const setHeader = jest.fn();
     const context = {
       getType: () => "http",
+      getClass: () => ({ name: "MessagesController" }),
+      getHandler: () => ({ name: "create" }),
       switchToHttp: () => ({
         getRequest: () => ({
           method: "POST",
@@ -19,7 +26,7 @@ describe("TraceHttpInterceptor", () => {
             "x-request-id": "req-123",
           },
         }),
-        getResponse: () => ({ setHeader }),
+        getResponse: () => ({ setHeader, statusCode: 202 }),
       }),
     } as never;
 
@@ -42,6 +49,25 @@ describe("TraceHttpInterceptor", () => {
     expect(setHeader).toHaveBeenCalledWith(
       "traceparent",
       expect.stringMatching(/^00-4bf92f3577b34da6a3ce929d0e0e4736-[0-9a-f]{16}-01$/),
+    );
+    expect(recordSpan).toHaveBeenCalledTimes(1);
+    expect(recordSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({
+          traceId: "4bf92f3577b34da6a3ce929d0e0e4736",
+          parentSpanId: "00f067aa0ba902b7",
+          requestId: "req-123",
+        }),
+        name: "HTTP POST MessagesController.create",
+        kind: 2,
+        attributes: {
+          "http.request.method": "POST",
+          "http.response.status_code": 202,
+          "code.namespace": "MessagesController",
+          "code.function": "create",
+        },
+        statusCode: 0,
+      }),
     );
   });
 });
