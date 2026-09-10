@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { Module } from "@nestjs/common";
 import { MulterModule } from "@nestjs/platform-express";
 import { MetaModule } from "../meta/meta.module.js";
+import { MediaAssetRetentionService } from "./media-asset-retention.service.js";
 import { MediaController } from "./media.controller.js";
 import { MediaMalwareScannerService } from "./media-malware-scanner.service.js";
 import { MAX_MEDIA_UPLOAD_BYTES } from "./media-upload.policy.js";
@@ -21,6 +22,6 @@ import { MediaService } from "./media.service.js";
     }),
   ],
   controllers: [MediaController],
-  providers: [MediaMalwareScannerService, MediaService],
+  providers: [MediaMalwareScannerService, MediaAssetRetentionService, MediaService],
 })
 export class MediaModule {}
