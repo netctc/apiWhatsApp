@@ -10,7 +10,7 @@ describe("S3 Signature V4", () => {
       url: new URL("https://examplebucket.s3.amazonaws.com/test.txt"),
       region: "us-east-1",
       accessKeyId: "AKIAIOSFODNN7EXAMPLE",
-      secretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+      secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
       payloadHash: EMPTY_SHA256,
       date: new Date("2013-05-24T00:00:00.000Z"),
       headers: {
