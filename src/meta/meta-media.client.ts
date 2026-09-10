@@ -1,6 +1,7 @@
 import { openAsBlob } from "node:fs";
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { APP_USER_AGENT } from "../version.js";
 import { MetaApiError } from "./meta-api.error.js";
 import { metaGraphUrl } from "./meta-graph-url.util.js";
 import type { MetaSenderContext } from "./meta-sender-resolver.service.js";
@@ -46,7 +47,7 @@ export class MetaMediaClient {
         method: "POST",
         headers: {
           Authorization: `Bearer ${sender.accessToken}`,
-          "User-Agent": "apiWhatsApp/0.16",
+          "User-Agent": APP_USER_AGENT,
         },
         body: formData,
         signal: AbortSignal.timeout(timeoutMs),
