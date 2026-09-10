@@ -18,7 +18,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - WABA template synchronization and lifecycle tracking
 - Local `APPROVED` template enforcement before outbound creation
 - Outbound text plus image/video/audio/document media messaging
-- Tenant-scoped direct media upload to Meta with bounded disk-backed multipart handling
+- Tenant-scoped direct media upload with bounded disk-backed multipart handling and MIME/content signature validation
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues, retry queues, DLQs, and traffic-class prefetch
 - Priority-aware Redis sender capacity reservation
@@ -67,7 +67,7 @@ flowchart LR
 
 Outbound message requests accept and persist work quickly; WhatsApp delivery is asynchronous. Message creation and the intent to publish are committed atomically before RabbitMQ publication.
 
-Media upload is intentionally different: it is a bounded synchronous provider operation that writes one temporary file to disk, uploads it directly to Meta, returns the resulting media ID, and removes the temporary file in `finally`.
+Media upload is intentionally different: it is a bounded synchronous provider operation that writes one temporary file to disk, validates declared MIME/size plus a bounded content signature/container prefix, uploads it directly to Meta, returns the resulting media ID, and removes the temporary file in `finally`.
 
 The agent inbox is an operational layer over the authoritative `Message` store. Conversation rows keep assignment/state/activity data; message payloads and provider lifecycle remain on `Message`.
 
@@ -195,7 +195,7 @@ file       required
 senderId   optional tenant-scoped sender UUID
 ```
 
-The endpoint writes one upload to OS/container temporary storage rather than buffering the full file in the Node.js heap. It validates the multipart field set, declared MIME type and size, resolves the sender inside the authenticated tenant, uploads to Meta with that sender's credential, returns the provider media ID, and deletes the temporary file on every service exit path.
+The endpoint writes one upload to OS/container temporary storage rather than buffering the full file in the Node.js heap. It validates the multipart field set, declared MIME type and size, cross-checks a bounded file signature/container prefix, resolves the sender inside the authenticated tenant, uploads to Meta with that sender's credential, returns the provider media ID, and deletes the temporary file on every service exit path.
 
 Current local limits are intentionally at or below the provider limits:
 
@@ -218,7 +218,7 @@ Example response:
 }
 ```
 
-The service does not persist uploaded binaries or an asset registry in the current media-upload foundation. It validates declared MIME and size; magic-byte inspection, malware scanning, quarantine/object storage and retention policy remain future hardening. See `docs/media-upload.md`.
+The service does not persist uploaded binaries or an asset registry in the current media-upload foundation. It validates declared MIME/size and reads at most an 8 KiB prefix for signature/container checks before credentials/provider access. This is not malware scanning, codec validation, or complete Office/document parsing; controlled quarantine/object storage, malware/content scanning, and retention policy remain future hardening. See `docs/media-upload.md`.
 
 ## Senders and templates
 
@@ -410,7 +410,7 @@ Core coverage proves:
 
 ```text
 text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mock -> SUBMITTED
-multipart media upload -> temporary disk file -> tenant sender -> Meta mock /media -> mediaId
+multipart media upload -> temporary disk file -> MIME/size + signature check -> tenant sender -> Meta mock /media -> mediaId
 ```
 
 Inbox coverage proves:
@@ -432,7 +432,7 @@ The normal Graph host remains `https://graph.facebook.com`.
 
 `META_GRAPH_API_BASE_URL` exists for controlled testing. HTTP overrides are accepted only under `NODE_ENV=test`; non-test environments require HTTPS. Embedded URL credentials, query strings, and fragments are rejected.
 
-See `docs/testing.md` for local execution, test boundaries, staged capacity profiles, and recommended failure-injection scenarios.
+See `docs/testing.md` for local execution, test boundaries, staged capacity profiles, and failure/concurrency coverage.
 
 ## Supply-chain and Docker policy
 
@@ -495,10 +495,10 @@ Never commit production credentials or access tokens.
 
 ## Next implementation slices
 
-- production capacity / soak / failure-injection test expansion
+- production capacity / soak / new incident-driven failure-injection test expansion
 - OpenTelemetry span export and tracing-backend integration
 - provider-backed secret stores beyond environment references
-- controlled media quarantine/object storage, content sniffing, malware scanning and retention
+- controlled media quarantine/object storage, malware/content scanning and retention
 - realtime inbox delivery (SSE/WebSocket), teams/skills, routing policies, SLA/escalation and human-agent session/SSO integration
 - optional inbox frontend application
 
