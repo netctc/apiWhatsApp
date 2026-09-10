@@ -57,10 +57,11 @@ export async function runBoundedLoad<T>(
 
       const attemptStartedAt = performance.now();
       try {
+        const value = await operation(index);
         results[index] = {
           index,
           durationMs: performance.now() - attemptStartedAt,
-          value: await operation(index),
+          value,
         };
       } catch (error) {
         results[index] = {
@@ -80,12 +81,14 @@ export function summarizeDurations(durations: number[]): DurationSummary {
   if (durations.length === 0) {
     throw new Error("At least one duration is required");
   }
-  const sorted = durations.map((value) => {
-    if (!Number.isFinite(value) || value < 0) {
-      throw new Error("Durations must be non-negative finite numbers");
-    }
-    return value;
-  }).sort((a, b) => a - b);
+  const sorted = durations
+    .map((value) => {
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error("Durations must be non-negative finite numbers");
+      }
+      return value;
+    })
+    .sort((a, b) => a - b);
 
   return {
     minMs: sorted[0]!,
