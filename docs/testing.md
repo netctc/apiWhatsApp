@@ -206,6 +206,22 @@ The test then restores the real CI RabbitMQ URL and starts the real outbound wor
 
 This proves temporary RabbitMQ unavailability does not lose accepted work and does not require application-level client replay after the HTTP request has already committed.
 
+## Redis outage during outbound rate limiting
+
+The rate-limiter recovery gate places a local TCP fault proxy between the outbound worker and the real CI Redis service. The proxy initially rejects Redis connections while PostgreSQL and RabbitMQ remain healthy, so the normal outbox path can publish and the worker can claim the message before failing at the distributed sender-capacity reservation step.
+
+During the Redis outage the suite requires:
+
+- the worker to release the message processing lease and return the message to `QUEUED`;
+- persisted error code `RATE_LIMITER_UNAVAILABLE`;
+- exactly one failed processing claim before recovery;
+- zero Meta provider calls while sender capacity cannot be reserved;
+- the failure to enter the normal bounded RabbitMQ retry path.
+
+The proxy is then switched to forward TCP traffic to the real Redis service. The same persistent ioredis client must reconnect through the proxy before the queued retry fires. The retry must claim the same logical message, reserve sender capacity, submit it once to the Meta test double, clear the transient error fields, and finish at `SUBMITTED`.
+
+This proves a temporary Redis outage blocks provider traffic safely, preserves the logical message for retry, and recovers without restarting the worker or duplicating a Meta submission.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -247,9 +263,8 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, and recovery from RabbitMQ unavailability during outbox publication. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, and Redis rate-limiter recovery. Further failure-injection suites should be added incrementally for:
 
-- Redis unavailable during outbound rate limiting;
 - worker termination while a processing lease is active;
 - API termination after DB commit but before outbox publish;
 - webhook burst while campaigns are running.
