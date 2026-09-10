@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,19 +142,21 @@ describe("mounted sender secret reference integration", () => {
   });
 
   afterAll(async () => {
-    delete process.env.SECRET_FILE_ROOTS;
-    delete process.env.MEDIA_ASSET_TTL_DAYS;
-    delete process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS;
-
-    if (prisma && tenantId) {
-      await prisma.tenant.deleteMany({ where: { id: tenantId } });
-    }
-    await app?.close();
-    if (metaServer) {
-      await closeServer(metaServer);
-    }
-    if (secretRoot) {
-      await rm(secretRoot, { recursive: true, force: true });
+    try {
+      if (prisma && tenantId) {
+        await prisma.tenant.deleteMany({ where: { id: tenantId } });
+      }
+    } finally {
+      await app?.close().catch(() => undefined);
+      if (metaServer) {
+        await closeServer(metaServer).catch(() => undefined);
+      }
+      if (secretRoot) {
+        await rm(secretRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+      delete process.env.SECRET_FILE_ROOTS;
+      delete process.env.MEDIA_ASSET_TTL_DAYS;
+      delete process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS;
     }
   });
 
@@ -191,9 +193,7 @@ describe("mounted sender secret reference integration", () => {
 
     const rotatedPath = join(secretRoot, "meta-access-token-next");
     await writeFile(rotatedPath, "mounted-token-v2\n", { mode: 0o600 });
-    await rm(secretPath, { force: true });
-    await mkdir(secretRoot, { recursive: true });
-    await writeFile(secretPath, "mounted-token-v2\n", { mode: 0o600 });
+    await rename(rotatedPath, secretPath);
 
     const second = await request(app.getHttpServer())
       .post("/api/v1/media")
