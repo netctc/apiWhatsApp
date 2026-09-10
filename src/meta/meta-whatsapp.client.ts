@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { APP_USER_AGENT } from "../version.js";
 import { MetaApiError } from "./meta-api.error.js";
 import { metaGraphUrl } from "./meta-graph-url.util.js";
 import { mapMessageToMetaPayload } from "./meta-message.mapper.js";
@@ -41,7 +42,7 @@ export class MetaWhatsAppClient {
         headers: {
           Authorization: `Bearer ${sender.accessToken}`,
           "Content-Type": "application/json",
-          "User-Agent": "apiWhatsApp/0.14",
+          "User-Agent": APP_USER_AGENT,
         },
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(timeoutMs),
