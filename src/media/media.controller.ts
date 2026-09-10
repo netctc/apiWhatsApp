@@ -49,9 +49,9 @@ export class MediaController {
   })
   upload(
     @CurrentPrincipal() principal: ApiPrincipal,
-    @Body("senderId") senderId: string | undefined,
+    @Body() fields: Record<string, unknown>,
     @UploadedFile() file: StoredMediaUploadFile | undefined,
   ) {
-    return this.media.upload(principal.tenantId, senderId, file);
+    return this.media.upload(principal.tenantId, fields, file);
   }
 }
