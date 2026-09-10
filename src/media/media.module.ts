@@ -6,6 +6,7 @@ import { MediaAssetRetentionService } from "./media-asset-retention.service.js";
 import { MediaBinaryStorageService } from "./media-binary-storage.service.js";
 import { MediaController } from "./media.controller.js";
 import { MediaMalwareScannerService } from "./media-malware-scanner.service.js";
+import { MediaS3StorageService } from "./media-s3-storage.service.js";
 import { MAX_MEDIA_UPLOAD_BYTES } from "./media-upload.policy.js";
 import { MediaService } from "./media.service.js";
 
@@ -25,6 +26,7 @@ import { MediaService } from "./media.service.js";
   controllers: [MediaController],
   providers: [
     MediaMalwareScannerService,
+    MediaS3StorageService,
     MediaBinaryStorageService,
     MediaAssetRetentionService,
     MediaService,

@@ -1,6 +1,8 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
 import { IsBoolean, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from "class-validator";
 
+const SECRET_REFERENCE_PATTERN = /^(?:env:[A-Z_][A-Z0-9_]*|file:\/[^\0\r\n]{1,500})$/;
+
 export class UpdatePhoneNumberDto {
   @ApiPropertyOptional({ example: "8856996819413533" })
   @IsOptional()
@@ -20,10 +22,14 @@ export class UpdatePhoneNumberDto {
   @MaxLength(200)
   verifiedName?: string;
 
-  @ApiPropertyOptional({ example: "env:META_ACME_WHATSAPP_TOKEN" })
+  @ApiPropertyOptional({
+    example: "file:/run/secrets/api-whatsapp/meta-token",
+    description: "Meta access-token secret reference using env:VARIABLE_NAME or file:/absolute/path.",
+  })
   @IsOptional()
   @IsString()
-  @Matches(/^env:[A-Z][A-Z0-9_]*$/)
+  @MaxLength(512)
+  @Matches(SECRET_REFERENCE_PATTERN)
   credentialRef?: string;
 
   @ApiPropertyOptional({ example: 75, minimum: 1, maximum: 1000 })

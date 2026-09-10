@@ -1,8 +1,23 @@
-import { Injectable, Logger } from "@nestjs/common";
-import { Message, MessageStatus, Prisma } from "../generated/prisma/client.js";
+import { Injectable, Logger, Optional } from "@nestjs/common";
+import { performance } from "node:perf_hooks";
+import { Message, MessageStatus, MessageTrafficClass, Prisma } from "../generated/prisma/client.js";
 import { MetaApiError } from "../meta/meta-api.error.js";
-import { MetaSenderResolverService } from "../meta/meta-sender-resolver.service.js";
-import { MetaWhatsAppClient } from "../meta/meta-whatsapp.client.js";
+import {
+  MetaSenderResolverService,
+  type MetaSenderContext,
+} from "../meta/meta-sender-resolver.service.js";
+import {
+  MetaWhatsAppClient,
+  type MetaSendMessageResult,
+} from "../meta/meta-whatsapp.client.js";
+import {
+  OtlpTraceExporterService,
+  type OtlpAttributeValue,
+} from "../observability/otlp-trace-exporter.service.js";
+import {
+  TraceContextService,
+  type TraceContext,
+} from "../observability/trace-context.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { OutboundQueueJob, QueueProcessingResult } from "../queue/messaging-queue.service.js";
 import { DistributedRateLimiterService } from "./distributed-rate-limiter.service.js";
@@ -17,6 +32,8 @@ const TERMINAL_OR_SUBMITTED_STATUSES = new Set<MessageStatus>([
   MessageStatus.EXPIRED,
 ]);
 
+type ClientSpanStatusCode = 0 | 2;
+
 @Injectable()
 export class MessageDispatcherService {
   private readonly logger = new Logger(MessageDispatcherService.name);
@@ -26,10 +43,12 @@ export class MessageDispatcherService {
     private readonly meta: MetaWhatsAppClient,
     private readonly senderResolver: MetaSenderResolverService,
     private readonly rateLimiter: DistributedRateLimiterService,
+    @Optional() private readonly traceContext?: TraceContextService,
+    @Optional() private readonly otlp?: OtlpTraceExporterService,
   ) {}
 
   async dispatch(job: OutboundQueueJob): Promise<QueueProcessingResult> {
-    const claim = await this.claimMessage(job.messageId);
+    const claim = await this.claimMessageWithTrace(job.messageId);
     if (!claim.claimed) {
       if (!claim.message) {
         this.logger.warn(`Ignoring queue job for missing message ${job.messageId}`);
@@ -77,7 +96,7 @@ export class MessageDispatcherService {
     }
 
     try {
-      await this.rateLimiter.waitForOutboundSlot(
+      await this.waitForOutboundSlotWithTrace(
         sender.phoneNumberId,
         message.trafficClass,
         sender.rateLimitPerSecond,
@@ -89,7 +108,7 @@ export class MessageDispatcherService {
     }
 
     try {
-      const result = await this.meta.sendMessage(message, sender);
+      const result = await this.sendToMeta(message, sender);
       await this.prisma.message.update({
         where: { id: message.id },
         data: {
@@ -147,6 +166,182 @@ export class MessageDispatcherService {
       "RETRY_EXHAUSTED",
       reason ?? `Outbound retry policy exhausted after ${job.attempt + 1} queue attempts`,
     );
+  }
+
+  private async claimMessageWithTrace(
+    messageId: string,
+  ): Promise<{ claimed: boolean; message: Message | null }> {
+    return this.runClientSpan(
+      "postgresql claim outbound_message",
+      {
+        "db.system.name": "postgresql",
+        "app.operation": "claim_outbound_message",
+      },
+      () => this.claimMessage(messageId),
+      (result) => ({
+        "app.datastore.result": result.claimed
+          ? "claimed"
+          : result.message
+            ? "not_claimed"
+            : "missing",
+      }),
+    );
+  }
+
+  private async waitForOutboundSlotWithTrace(
+    phoneNumberId: string,
+    trafficClass: MessageTrafficClass,
+    rateLimitPerSecond?: number,
+  ): Promise<void> {
+    await this.runClientSpan(
+      "redis reserve outbound_slot",
+      {
+        "db.system.name": "redis",
+        "app.operation": "reserve_outbound_slot",
+        "app.message.traffic_class": trafficClass,
+      },
+      () => this.rateLimiter.waitForOutboundSlot(phoneNumberId, trafficClass, rateLimitPerSecond),
+      () => ({ "app.datastore.result": "success" }),
+    );
+  }
+
+  private async runClientSpan<T>(
+    name: string,
+    attributes: Record<string, OtlpAttributeValue>,
+    operation: () => Promise<T>,
+    completedAttributes: (result: T) => Record<string, OtlpAttributeValue>,
+  ): Promise<T> {
+    const parent = this.traceContext?.carrier();
+    if (!parent || !this.traceContext) {
+      return operation();
+    }
+
+    return this.traceContext.runFromParent(parent, async () => {
+      const context = this.traceContext?.current();
+      const startedAtUnixNano = BigInt(Date.now()) * 1_000_000n;
+      const startedAt = performance.now();
+      try {
+        const result = await operation();
+        this.recordClientSpan(
+          context,
+          name,
+          startedAtUnixNano,
+          startedAt,
+          { ...attributes, ...completedAttributes(result) },
+          0,
+        );
+        return result;
+      } catch (error) {
+        this.recordClientSpan(
+          context,
+          name,
+          startedAtUnixNano,
+          startedAt,
+          { ...attributes, "app.datastore.result": "error" },
+          2,
+        );
+        throw error;
+      }
+    });
+  }
+
+  private recordClientSpan(
+    context: TraceContext | undefined,
+    name: string,
+    startedAtUnixNano: bigint,
+    startedAt: number,
+    attributes: Record<string, OtlpAttributeValue>,
+    statusCode: ClientSpanStatusCode,
+  ): void {
+    if (!context) {
+      return;
+    }
+    const durationNano = BigInt(
+      Math.max(0, Math.round((performance.now() - startedAt) * 1_000_000)),
+    );
+    this.otlp?.recordSpan({
+      context,
+      name,
+      kind: 3,
+      startTimeUnixNano: startedAtUnixNano,
+      endTimeUnixNano: startedAtUnixNano + durationNano,
+      attributes,
+      statusCode,
+    });
+  }
+
+  private async sendToMeta(
+    message: Message,
+    sender: MetaSenderContext,
+  ): Promise<MetaSendMessageResult> {
+    const parent = this.traceContext?.carrier();
+    if (!parent || !this.traceContext) {
+      return this.meta.sendMessage(message, sender);
+    }
+
+    return this.traceContext.runFromParent(parent, async () => {
+      const context = this.traceContext?.current();
+      const startedAtUnixNano = BigInt(Date.now()) * 1_000_000n;
+      const startedAt = performance.now();
+      try {
+        const result = await this.meta.sendMessage(message, sender);
+        this.recordMetaClientSpan(
+          context,
+          message,
+          startedAtUnixNano,
+          startedAt,
+          "success",
+          undefined,
+          0,
+        );
+        return result;
+      } catch (error) {
+        const metaError = error instanceof MetaApiError ? error : undefined;
+        this.recordMetaClientSpan(
+          context,
+          message,
+          startedAtUnixNano,
+          startedAt,
+          metaError ? (metaError.retryable ? "retryable_error" : "permanent_error") : "exception",
+          metaError?.httpStatus,
+          2,
+        );
+        throw error;
+      }
+    });
+  }
+
+  private recordMetaClientSpan(
+    context: TraceContext | undefined,
+    message: Message,
+    startedAtUnixNano: bigint,
+    startedAt: number,
+    result: "success" | "retryable_error" | "permanent_error" | "exception",
+    httpStatus: number | undefined,
+    statusCode: ClientSpanStatusCode,
+  ): void {
+    if (!context) {
+      return;
+    }
+    const durationNano = BigInt(
+      Math.max(0, Math.round((performance.now() - startedAt) * 1_000_000)),
+    );
+    this.otlp?.recordSpan({
+      context,
+      name: "meta.whatsapp send_message",
+      kind: 3,
+      startTimeUnixNano: startedAtUnixNano,
+      endTimeUnixNano: startedAtUnixNano + durationNano,
+      attributes: {
+        "http.request.method": "POST",
+        "app.provider": "meta_whatsapp",
+        "app.operation": "send_message",
+        "app.message.traffic_class": message.trafficClass,
+        "app.meta.result": result,
+        ...(httpStatus !== undefined ? { "http.response.status_code": httpStatus } : {}),
+      },
+      statusCode,
+    });
   }
 
   private async claimMessage(messageId: string): Promise<{ claimed: boolean; message: Message | null }> {

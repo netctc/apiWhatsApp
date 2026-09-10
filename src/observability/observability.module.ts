@@ -5,6 +5,7 @@ import { HttpMetricsInterceptor } from "./http-metrics.interceptor.js";
 import { MetricsController } from "./metrics.controller.js";
 import { MetricsService } from "./metrics.service.js";
 import { MetricsTokenGuard } from "./metrics-token.guard.js";
+import { OtlpTraceExporterService } from "./otlp-trace-exporter.service.js";
 import { TraceContextService } from "./trace-context.service.js";
 import { TraceHttpInterceptor } from "./trace-http.interceptor.js";
 
@@ -14,11 +15,12 @@ import { TraceHttpInterceptor } from "./trace-http.interceptor.js";
   controllers: [MetricsController],
   providers: [
     TraceContextService,
+    OtlpTraceExporterService,
     MetricsService,
     MetricsTokenGuard,
     { provide: APP_INTERCEPTOR, useClass: TraceHttpInterceptor },
     { provide: APP_INTERCEPTOR, useClass: HttpMetricsInterceptor },
   ],
-  exports: [TraceContextService, MetricsService],
+  exports: [TraceContextService, OtlpTraceExporterService, MetricsService],
 })
 export class ObservabilityModule {}
