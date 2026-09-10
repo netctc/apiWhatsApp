@@ -3,6 +3,7 @@ import { Module } from "@nestjs/common";
 import { MulterModule } from "@nestjs/platform-express";
 import { MetaModule } from "../meta/meta.module.js";
 import { MediaController } from "./media.controller.js";
+import { MediaMalwareScannerService } from "./media-malware-scanner.service.js";
 import { MAX_MEDIA_UPLOAD_BYTES } from "./media-upload.policy.js";
 import { MediaService } from "./media.service.js";
 
@@ -20,6 +21,6 @@ import { MediaService } from "./media.service.js";
     }),
   ],
   controllers: [MediaController],
-  providers: [MediaService],
+  providers: [MediaMalwareScannerService, MediaService],
 })
 export class MediaModule {}
