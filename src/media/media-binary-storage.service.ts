@@ -6,9 +6,12 @@ import { Injectable } from "@nestjs/common";
 
 export type MediaBinaryStorageMode = "DISABLED" | "FILESYSTEM";
 
-export interface StagedMediaBinary {
+export interface MediaBinaryStorageTarget {
   mode: MediaBinaryStorageMode;
   key: string | null;
+}
+
+export interface StagedMediaBinary extends MediaBinaryStorageTarget {
   filePath: string;
   storedAt: Date | null;
 }
@@ -22,20 +25,32 @@ export class MediaBinaryStorageError extends Error {
 
 @Injectable()
 export class MediaBinaryStorageService {
-  async stage(sourcePath: string, tenantId: string, assetId: string): Promise<StagedMediaBinary> {
+  targetFor(tenantId: string, assetId: string): MediaBinaryStorageTarget {
     const mode = this.mode();
     if (mode === "DISABLED") {
-      return {
-        mode,
-        key: null,
-        filePath: sourcePath,
-        storedAt: null,
-      };
+      return { mode, key: null };
     }
 
     const root = this.filesystemRoot();
     const key = `${tenantId}/${assetId}`;
-    const targetPath = this.pathForKey(root, key);
+    this.pathForKey(root, key);
+    return { mode, key };
+  }
+
+  async stage(sourcePath: string, target: MediaBinaryStorageTarget): Promise<StagedMediaBinary> {
+    if (target.mode === "DISABLED") {
+      return {
+        ...target,
+        filePath: sourcePath,
+        storedAt: null,
+      };
+    }
+    if (target.mode !== "FILESYSTEM" || !target.key) {
+      throw new MediaBinaryStorageError("Invalid filesystem media storage target");
+    }
+
+    const root = this.filesystemRoot();
+    const targetPath = this.pathForKey(root, target.key);
 
     try {
       await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
@@ -51,8 +66,7 @@ export class MediaBinaryStorageService {
     }
 
     return {
-      mode,
-      key,
+      ...target,
       filePath: targetPath,
       storedAt: new Date(),
     };
