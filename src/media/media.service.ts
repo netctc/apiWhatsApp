@@ -103,6 +103,16 @@ export class MediaService {
       }
 
       try {
+        await this.binaryStorage.assertCapacityFor?.(file.size);
+      } catch (error) {
+        if (error instanceof MediaBinaryStorageError) {
+          this.logger.warn("Media binary storage admission failed closed");
+          throw new ServiceUnavailableException("Media binary storage is unavailable");
+        }
+        throw error;
+      }
+
+      try {
         await this.malwareScanner.scan(file.path);
       } catch (error) {
         if (error instanceof MediaMalwareScanError) {
