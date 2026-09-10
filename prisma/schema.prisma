@@ -382,6 +382,9 @@ model MediaAsset {
   size               Int
   scanMode           String
   scanStatus         String
+  storageMode        String              @default("DISABLED")
+  storageKey         String?
+  storedAt           DateTime?
   providerUploadedAt DateTime?
   expiresAt          DateTime?
   failedAt           DateTime?
@@ -392,6 +395,8 @@ model MediaAsset {
   sender             WhatsAppPhoneNumber @relation(fields: [senderId], references: [id], onDelete: Cascade)
 
   @@unique([tenantId, providerMediaId])
+  @@unique([tenantId, storageKey])
+  @@index([expiresAt, createdAt])
   @@index([tenantId, createdAt])
   @@index([tenantId, expiresAt, createdAt])
   @@index([tenantId, senderId, createdAt])
