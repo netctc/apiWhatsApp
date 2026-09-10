@@ -162,7 +162,13 @@ export class MediaService {
           });
         }
 
-        return this.toResponse(completed);
+        return {
+          mediaId: completed.providerMediaId,
+          senderId: completed.senderId,
+          category: completed.category,
+          mimeType: completed.mimeType,
+          size: completed.size,
+        };
       } catch (error) {
         if (error instanceof ServiceUnavailableException) {
           throw error;
