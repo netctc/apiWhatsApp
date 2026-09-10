@@ -4,6 +4,7 @@ export const REQUIRED_SCOPES_KEY = "auth:requiredScopes";
 export enum ApiScope {
   MESSAGES_READ = "messages:read",
   MESSAGES_WRITE = "messages:write",
+  MEDIA_READ = "media:read",
   MEDIA_WRITE = "media:write",
   CONTACTS_READ = "contacts:read",
   CONTACTS_WRITE = "contacts:write",
