@@ -254,40 +254,48 @@ describe("distributed outbound OTLP trace integration", () => {
   });
 
   afterAll(async () => {
-    if (prisma && tenantId) {
-      const messages = await prisma.message.findMany({
-        where: { tenantId },
-        select: { id: true },
-      });
-      const messageIds = messages.map((message) => message.id);
-      if (messageIds.length > 0) {
-        await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: messageIds } } });
-        await prisma.message.deleteMany({ where: { id: { in: messageIds } } });
+    await Promise.allSettled([
+      worker ? worker.close() : Promise.resolve(),
+      app ? app.close() : Promise.resolve(),
+    ]);
+
+    try {
+      if (prisma && tenantId) {
+        const messages = await prisma.message.findMany({
+          where: { tenantId },
+          select: { id: true },
+        });
+        const messageIds = messages.map((message) => message.id);
+        if (messageIds.length > 0) {
+          await prisma.outboxEvent.deleteMany({ where: { aggregateId: { in: messageIds } } });
+          await prisma.message.deleteMany({ where: { id: { in: messageIds } } });
+        }
+        await prisma.conversationNote.deleteMany({ where: { tenantId } });
+        await prisma.conversation.deleteMany({ where: { tenantId } });
+        await prisma.contact.deleteMany({ where: { tenantId } });
+        await prisma.whatsAppPhoneNumber.deleteMany({ where: { tenantId } });
+        await prisma.auditLog.deleteMany({ where: { tenantId } });
+        await prisma.apiKey.deleteMany({ where: { tenantId } });
+        await prisma.tenant.deleteMany({ where: { id: tenantId } });
       }
-      await prisma.contact.deleteMany({ where: { tenantId } });
-      await prisma.whatsAppPhoneNumber.deleteMany({ where: { tenantId } });
-      await prisma.apiKey.deleteMany({ where: { tenantId } });
-      await prisma.tenant.deleteMany({ where: { id: tenantId } });
-    }
+    } finally {
+      if (metaServer) {
+        await closeServer(metaServer).catch(() => undefined);
+      }
+      if (collector) {
+        await closeServer(collector).catch(() => undefined);
+      }
 
-    await worker?.close();
-    await app?.close();
-    if (metaServer) {
-      await closeServer(metaServer);
+      delete process.env.OTEL_SERVICE_NAME;
+      delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+      delete process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL;
+      delete process.env.OTEL_EXPORTER_OTLP_TRACES_TIMEOUT;
+      delete process.env.OTEL_BSP_SCHEDULE_DELAY;
+      delete process.env.OTEL_TRACES_SAMPLER;
+      delete process.env.OTEL_TRACES_SAMPLER_ARG;
+      delete process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS;
+      delete process.env.MEDIA_BINARY_STORAGE_MODE;
     }
-    if (collector) {
-      await closeServer(collector);
-    }
-
-    delete process.env.OTEL_SERVICE_NAME;
-    delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
-    delete process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL;
-    delete process.env.OTEL_EXPORTER_OTLP_TRACES_TIMEOUT;
-    delete process.env.OTEL_BSP_SCHEDULE_DELAY;
-    delete process.env.OTEL_TRACES_SAMPLER;
-    delete process.env.OTEL_TRACES_SAMPLER_ARG;
-    delete process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS;
-    delete process.env.MEDIA_BINARY_STORAGE_MODE;
   });
 
   it("exports SERVER -> PRODUCER -> CONSUMER -> CLIENT for one traced outbound delivery", async () => {
