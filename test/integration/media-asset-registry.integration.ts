@@ -4,10 +4,12 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import request from "supertest";
 import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
+import { MediaAssetRetentionService } from "../../src/media/media-asset-retention.service.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
 
 const API_KEY_HASH_SECRET = "media-registry-integration-api-key-secret-0123456789";
 const TTL_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 function requireInfrastructure(): void {
   for (const name of ["DATABASE_URL", "REDIS_URL", "RABBITMQ_URL"] as const) {
@@ -70,6 +72,7 @@ async function createKey(
 describe("media asset registry integration", () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  let retention: MediaAssetRetentionService;
   let metaServer: Server;
   let tenantId: string;
   let otherTenantId: string;
@@ -115,6 +118,7 @@ describe("media asset registry integration", () => {
     process.env.TEST_META_ACCESS_TOKEN = "media-registry-integration-access-token";
     process.env.MEDIA_MALWARE_SCAN_MODE = "disabled";
     process.env.MEDIA_ASSET_TTL_DAYS = String(TTL_DAYS);
+    process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS = "3600000";
     process.env.OUTBOUND_QUEUE_NAME = `whatsapp.media-registry.${process.pid}.${Date.now()}`;
     process.env.OUTBOX_POLL_INTERVAL_MS = "1000";
     process.env.WEBHOOK_PROCESSOR_INTERVAL_MS = "1000";
@@ -132,6 +136,7 @@ describe("media asset registry integration", () => {
     );
     await app.listen(0, "127.0.0.1");
     prisma = app.get(PrismaService);
+    retention = app.get(MediaAssetRetentionService);
 
     const suffix = `${process.pid}-${Date.now()}`;
     const [tenant, otherTenant] = await Promise.all([
@@ -175,6 +180,7 @@ describe("media asset registry integration", () => {
 
   afterAll(async () => {
     delete process.env.MEDIA_ASSET_TTL_DAYS;
+    delete process.env.MEDIA_ASSET_CLEANUP_INTERVAL_MS;
     process.env.MEDIA_MALWARE_SCAN_MODE = "disabled";
 
     if (prisma) {
@@ -214,8 +220,11 @@ describe("media asset registry integration", () => {
     });
     expect(providerCalls).toBe(1);
 
-    const persisted = await prisma.mediaAsset.findUniqueOrThrow({
-      where: { providerMediaId: upload.body.mediaId },
+    const persisted = await prisma.mediaAsset.findFirstOrThrow({
+      where: {
+        tenantId,
+        providerMediaId: upload.body.mediaId,
+      },
     });
     expect(persisted.tenantId).toBe(tenantId);
     expect(persisted.senderId).toBe(senderId);
@@ -228,9 +237,9 @@ describe("media asset registry integration", () => {
     expect(persisted.failedAt).toBeNull();
     expect(persisted.providerUploadedAt).not.toBeNull();
     expect(persisted.expiresAt).not.toBeNull();
-    expect(persisted.expiresAt!.getTime() - persisted.providerUploadedAt!.getTime()).toBe(
-      TTL_DAYS * 24 * 60 * 60 * 1000,
-    );
+    const ttlFromCreation = persisted.expiresAt!.getTime() - persisted.createdAt.getTime();
+    expect(ttlFromCreation).toBeGreaterThan(TTL_DAYS * DAY_MS - 5000);
+    expect(ttlFromCreation).toBeLessThanOrEqual(TTL_DAYS * DAY_MS);
 
     const list = await request(app.getHttpServer())
       .get("/api/v1/media")
@@ -272,9 +281,9 @@ describe("media asset registry integration", () => {
       .expect(403);
   });
 
-  it("derives EXPIRED from the local registry TTL without mutating provider metadata", async () => {
-    const providerUploadedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-    const expiresAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  it("derives EXPIRED from local TTL and purges expired registry metadata", async () => {
+    const providerUploadedAt = new Date(Date.now() - 2 * DAY_MS);
+    const expiresAt = new Date(Date.now() - DAY_MS);
     const expired = await prisma.mediaAsset.create({
       data: {
         tenantId,
@@ -304,5 +313,11 @@ describe("media asset registry integration", () => {
         scanStatus: "CLEAN",
       }),
     );
+
+    await expect(retention.purgeExpired()).resolves.toBeGreaterThanOrEqual(1);
+    await request(app.getHttpServer())
+      .get(`/api/v1/media/${expired.id}`)
+      .set("X-API-Key", readWriteKey)
+      .expect(404);
   });
 });
