@@ -1,5 +1,6 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import { MessageDirection, MessageStatus, MessageType, Prisma } from "../generated/prisma/client.js";
+import { ConversationActivityService } from "../inbox/conversation-activity.service.js";
 import { PhoneNumbersService } from "../phone-numbers/phone-numbers.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { normalizePhoneNumber } from "../contacts/phone.util.js";
@@ -17,6 +18,7 @@ export class InboundMessageService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly phoneNumbers: PhoneNumbersService,
+    @Optional() private readonly conversationActivity?: ConversationActivityService,
   ) {}
 
   async process(payload: unknown): Promise<void> {
@@ -124,10 +126,18 @@ export class InboundMessageService {
           },
         });
 
+        const conversationId = await this.conversationActivity?.recordInbound(transaction, {
+          tenantId,
+          senderId,
+          contactId: contact.id,
+          occurredAt: inboundAt,
+        });
+
         await transaction.message.create({
           data: {
             tenantId,
             senderId,
+            ...(conversationId ? { conversationId } : {}),
             direction: MessageDirection.INBOUND,
             type: this.mapMessageType(message.type),
             status: MessageStatus.RECEIVED,
