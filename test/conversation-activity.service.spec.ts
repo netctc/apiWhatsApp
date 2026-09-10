@@ -24,12 +24,12 @@ describe("ConversationActivityService", () => {
 
   it("does not create or reopen inbox conversations for template traffic", async () => {
     const contactFindUnique = jest.fn();
-    const conversationUpsert = jest.fn();
+    const queryRaw = jest.fn();
 
     const result = await service.recordOutbound(
       {
         contact: { findUnique: contactFindUnique },
-        conversation: { upsert: conversationUpsert },
+        $queryRaw: queryRaw,
       } as never,
       {
         tenantId: "tenant-1",
@@ -42,25 +42,24 @@ describe("ConversationActivityService", () => {
 
     expect(result).toBeUndefined();
     expect(contactFindUnique).not.toHaveBeenCalled();
-    expect(conversationUpsert).not.toHaveBeenCalled();
+    expect(queryRaw).not.toHaveBeenCalled();
   });
 
-  it("links free-form outbound activity to the tenant sender/contact conversation", async () => {
-    const contactFindUnique = jest.fn().mockResolvedValue({ id: "contact-1" });
-    const conversationUpsert = jest.fn().mockResolvedValue({ id: "conversation-1" });
-    const occurredAt = new Date("2026-09-10T08:30:00.000Z");
+  it("links free-form outbound activity with one atomic monotonic conversation upsert", async () => {
+    const contactFindUnique = jest.fn().mockResolvedValue({ id: "33333333-3333-4333-8333-333333333333" });
+    const queryRaw = jest.fn().mockResolvedValue([{ id: "conversation-1" }]);
 
     const result = await service.recordOutbound(
       {
         contact: { findUnique: contactFindUnique },
-        conversation: { upsert: conversationUpsert },
+        $queryRaw: queryRaw,
       } as never,
       {
-        tenantId: "tenant-1",
-        senderId: "sender-1",
+        tenantId: "11111111-1111-4111-8111-111111111111",
+        senderId: "22222222-2222-4222-8222-222222222222",
         phone: "96170123456",
         messageType: MessageType.TEXT,
-        occurredAt,
+        occurredAt: new Date("2026-09-10T08:30:00.000Z"),
       },
     );
 
@@ -68,29 +67,38 @@ describe("ConversationActivityService", () => {
     expect(contactFindUnique).toHaveBeenCalledWith({
       where: {
         tenantId_phone: {
-          tenantId: "tenant-1",
+          tenantId: "11111111-1111-4111-8111-111111111111",
           phone: "96170123456",
         },
       },
       select: { id: true },
     });
-    expect(conversationUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: {
-          tenantId_senderId_contactId: {
-            tenantId: "tenant-1",
-            senderId: "sender-1",
-            contactId: "contact-1",
-          },
-        },
-        create: expect.objectContaining({
-          tenantId: "tenant-1",
-          senderId: "sender-1",
-          contactId: "contact-1",
-          lastMessageAt: occurredAt,
-          lastOutboundAt: occurredAt,
-        }),
-      }),
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+
+    const renderedSql = String(queryRaw.mock.calls[0]?.[0]);
+    expect(renderedSql).toContain("ON CONFLICT");
+    expect(renderedSql).toContain("GREATEST");
+  });
+
+  it("returns undefined when outbound activity has no tenant contact", async () => {
+    const contactFindUnique = jest.fn().mockResolvedValue(null);
+    const queryRaw = jest.fn();
+
+    const result = await service.recordOutbound(
+      {
+        contact: { findUnique: contactFindUnique },
+        $queryRaw: queryRaw,
+      } as never,
+      {
+        tenantId: "tenant-1",
+        senderId: "sender-1",
+        phone: "96170123456",
+        messageType: MessageType.TEXT,
+        occurredAt: new Date(),
+      },
     );
+
+    expect(result).toBeUndefined();
+    expect(queryRaw).not.toHaveBeenCalled();
   });
 });
