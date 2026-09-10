@@ -34,6 +34,7 @@ describe("MediaService", () => {
   const resolveForTenant = jest.fn();
   const uploadMedia = jest.fn();
   const scan = jest.fn();
+  const targetFor = jest.fn();
   const stage = jest.fn();
   const discard = jest.fn();
   const mediaAssetCreate = jest.fn();
@@ -66,7 +67,7 @@ describe("MediaService", () => {
     { resolveForTenant } as never,
     { uploadMedia } as never,
     { scan } as never,
-    { stage, discard } as never,
+    { targetFor, stage, discard } as never,
     {
       mediaAsset: {
         create: mediaAssetCreate,
@@ -88,9 +89,12 @@ describe("MediaService", () => {
     });
     uploadMedia.mockResolvedValue({ mediaId: "media-123" });
     scan.mockResolvedValue(undefined);
-    stage.mockImplementation(async (filePath: string) => ({
+    targetFor.mockImplementation((_tenantId: string, _assetId: string) => ({
       mode: "DISABLED",
       key: null,
+    }));
+    stage.mockImplementation(async (filePath: string, target: { mode: string; key: string | null }) => ({
+      ...target,
       filePath,
       storedAt: null,
     }));
@@ -98,7 +102,6 @@ describe("MediaService", () => {
     mediaAssetCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       ...pendingAsset,
       ...data,
-      id: ASSET_ID,
     }));
     mediaAssetUpdate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
       ...pendingAsset,
@@ -109,7 +112,7 @@ describe("MediaService", () => {
     mediaAssetFindFirst.mockResolvedValue(null);
   });
 
-  it("stages, scans, reserves expiring registry metadata before Meta, finalizes it, and removes the multipart temp file", async () => {
+  it("plans storage, scans, reserves registry metadata, then stages and uploads", async () => {
     const temp = await createTempFile();
     const startedAt = Date.now();
     try {
@@ -119,9 +122,9 @@ describe("MediaService", () => {
         size: temp.size,
       });
 
-      expect(stage).toHaveBeenCalledWith(temp.filePath, TENANT_ID, expect.any(String));
+      expect(targetFor).toHaveBeenCalledWith(TENANT_ID, expect.any(String));
       expect(scan).toHaveBeenCalledWith(temp.filePath);
-      expect(stage.mock.invocationCallOrder[0]).toBeLessThan(scan.mock.invocationCallOrder[0]);
+      expect(targetFor.mock.invocationCallOrder[0]).toBeLessThan(scan.mock.invocationCallOrder[0]);
       expect(scan.mock.invocationCallOrder[0]).toBeLessThan(resolveForTenant.mock.invocationCallOrder[0]);
       expect(resolveForTenant).toHaveBeenCalledWith(TENANT_ID, SENDER_ID);
       expect(mediaAssetCreate).toHaveBeenCalledWith({
@@ -140,7 +143,9 @@ describe("MediaService", () => {
           expiresAt: expect.any(Date),
         },
       });
-      expect(mediaAssetCreate.mock.invocationCallOrder[0]).toBeLessThan(uploadMedia.mock.invocationCallOrder[0]);
+      expect(mediaAssetCreate.mock.invocationCallOrder[0]).toBeLessThan(stage.mock.invocationCallOrder[0]);
+      expect(stage).toHaveBeenCalledWith(temp.filePath, { mode: "DISABLED", key: null });
+      expect(stage.mock.invocationCallOrder[0]).toBeLessThan(uploadMedia.mock.invocationCallOrder[0]);
       expect(uploadMedia).toHaveBeenCalledWith(
         {
           filePath: temp.filePath,
@@ -150,7 +155,7 @@ describe("MediaService", () => {
         expect.objectContaining({ internalSenderId: SENDER_ID }),
       );
       expect(mediaAssetUpdate).toHaveBeenCalledWith({
-        where: { id: ASSET_ID },
+        where: { id: expect.any(String) },
         data: expect.objectContaining({
           providerMediaId: "media-123",
           providerUploadedAt: expect.any(Date),
@@ -178,16 +183,18 @@ describe("MediaService", () => {
     }
   });
 
-  it("scans and uploads the staged filesystem copy while persisting only its internal key", async () => {
+  it("reserves the filesystem key before copying bytes and uploads the controlled copy", async () => {
     const temp = await createTempFile();
-    const stagedPath = "/var/lib/api-whatsapp/media/tenant/asset";
     const storedAt = new Date();
-    stage.mockResolvedValue({
+    targetFor.mockImplementation((tenantId: string, assetId: string) => ({
       mode: "FILESYSTEM",
-      key: `${TENANT_ID}/${ASSET_ID}`,
-      filePath: stagedPath,
+      key: `${tenantId}/${assetId}`,
+    }));
+    stage.mockImplementation(async (_filePath: string, target: { mode: string; key: string | null }) => ({
+      ...target,
+      filePath: `/var/lib/api-whatsapp/media/${target.key}`,
       storedAt,
-    });
+    }));
 
     try {
       await service.upload(TENANT_ID, {}, {
@@ -196,18 +203,27 @@ describe("MediaService", () => {
         size: temp.size,
       });
 
-      expect(scan).toHaveBeenCalledWith(stagedPath);
+      const reservation = mediaAssetCreate.mock.calls[0]?.[0] as {
+        data: { id: string; storageKey: string; storageMode: string };
+      };
+      expect(reservation.data.storageMode).toBe("FILESYSTEM");
+      expect(reservation.data.storageKey).toBe(`${TENANT_ID}/${reservation.data.id}`);
+      expect(mediaAssetCreate.mock.invocationCallOrder[0]).toBeLessThan(stage.mock.invocationCallOrder[0]);
+      expect(scan).toHaveBeenCalledWith(temp.filePath);
+      expect(stage).toHaveBeenCalledWith(temp.filePath, {
+        mode: "FILESYSTEM",
+        key: reservation.data.storageKey,
+      });
+      expect(mediaAssetUpdate).toHaveBeenNthCalledWith(1, {
+        where: { id: reservation.data.id },
+        data: { storedAt },
+      });
       expect(uploadMedia).toHaveBeenCalledWith(
-        expect.objectContaining({ filePath: stagedPath }),
+        expect.objectContaining({
+          filePath: `/var/lib/api-whatsapp/media/${reservation.data.storageKey}`,
+        }),
         expect.objectContaining({ internalSenderId: SENDER_ID }),
       );
-      expect(mediaAssetCreate).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          storageMode: "FILESYSTEM",
-          storageKey: `${TENANT_ID}/${ASSET_ID}`,
-          storedAt,
-        }),
-      });
       expect(discard).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
@@ -245,8 +261,10 @@ describe("MediaService", () => {
     }
   });
 
-  it("fails closed before scanning and provider access when binary staging is unavailable", async () => {
-    stage.mockRejectedValue(new MediaBinaryStorageError("volume unavailable"));
+  it("fails closed before scanning and credential access when storage configuration is invalid", async () => {
+    targetFor.mockImplementation(() => {
+      throw new MediaBinaryStorageError("invalid storage root");
+    });
     const temp = await createTempFile();
 
     try {
@@ -261,6 +279,7 @@ describe("MediaService", () => {
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(stage).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
@@ -268,7 +287,41 @@ describe("MediaService", () => {
     }
   });
 
-  it("fails before provider access when registry TTL configuration is invalid and discards any pre-registry stage", async () => {
+  it("records a bounded failure after registry reservation when binary staging is unavailable", async () => {
+    targetFor.mockImplementation((tenantId: string, assetId: string) => ({
+      mode: "FILESYSTEM",
+      key: `${tenantId}/${assetId}`,
+    }));
+    stage.mockRejectedValue(new MediaBinaryStorageError("volume unavailable"));
+    const temp = await createTempFile();
+
+    try {
+      await expect(
+        service.upload(TENANT_ID, {}, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      const reservation = mediaAssetCreate.mock.calls[0]?.[0] as { data: { id: string } };
+      expect(scan).toHaveBeenCalled();
+      expect(resolveForTenant).toHaveBeenCalled();
+      expect(mediaAssetUpdate).toHaveBeenCalledWith({
+        where: { id: reservation.data.id },
+        data: {
+          failedAt: expect.any(Date),
+          failureCode: "STORAGE_ERROR",
+        },
+      });
+      expect(uploadMedia).not.toHaveBeenCalled();
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails before registry/provider access when registry TTL configuration is invalid", async () => {
     process.env.MEDIA_ASSET_TTL_DAYS = "0";
     const temp = await createTempFile();
 
@@ -284,15 +337,15 @@ describe("MediaService", () => {
       expect(scan).toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(stage).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
-      expect(discard).toHaveBeenCalledWith("DISABLED", null);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
   });
 
-  it("rejects a supported declared MIME before staging when file content has a different signature", async () => {
+  it("rejects a supported declared MIME before storage planning when file content has a different signature", async () => {
     const temp = await createTempFile(
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
@@ -309,10 +362,11 @@ describe("MediaService", () => {
         }),
       });
 
-      expect(stage).not.toHaveBeenCalled();
+      expect(targetFor).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(stage).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
@@ -320,14 +374,11 @@ describe("MediaService", () => {
     }
   });
 
-  it("rejects malware before sender/provider/registry access and discards a staged filesystem copy", async () => {
-    const stagedPath = "/var/lib/api-whatsapp/media/tenant/asset";
-    stage.mockResolvedValue({
+  it("rejects malware before sender, registry, binary copy, and provider access", async () => {
+    targetFor.mockImplementation((tenantId: string, assetId: string) => ({
       mode: "FILESYSTEM",
-      key: `${TENANT_ID}/${ASSET_ID}`,
-      filePath: stagedPath,
-      storedAt: new Date(),
-    });
+      key: `${tenantId}/${assetId}`,
+    }));
     scan.mockRejectedValue(
       new MediaMalwareScanError("MALWARE_DETECTED", "Eicar-Test-Signature FOUND"),
     );
@@ -342,18 +393,17 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(UnprocessableEntityException);
 
-      expect(scan).toHaveBeenCalledWith(stagedPath);
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(stage).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
-      expect(discard).toHaveBeenCalledWith("FILESYSTEM", `${TENANT_ID}/${ASSET_ID}`);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
   });
 
-  it("fails closed before sender/provider/registry access when security scanning is unavailable", async () => {
+  it("fails closed before sender, registry, binary copy, and provider access when scanning is unavailable", async () => {
     scan.mockRejectedValue(
       new MediaMalwareScanError("SCANNER_UNAVAILABLE", "connection refused"),
     );
@@ -370,8 +420,8 @@ describe("MediaService", () => {
 
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(stage).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
-      expect(discard).toHaveBeenCalledWith("DISABLED", null);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
@@ -379,13 +429,16 @@ describe("MediaService", () => {
   });
 
   it("retains a reserved filesystem binary through a retryable Meta failure until TTL cleanup", async () => {
-    const stagedPath = "/var/lib/api-whatsapp/media/tenant/asset";
-    stage.mockResolvedValue({
+    const storedAt = new Date();
+    targetFor.mockImplementation((tenantId: string, assetId: string) => ({
       mode: "FILESYSTEM",
-      key: `${TENANT_ID}/${ASSET_ID}`,
-      filePath: stagedPath,
-      storedAt: new Date(),
-    });
+      key: `${tenantId}/${assetId}`,
+    }));
+    stage.mockImplementation(async (_filePath: string, target: { mode: string; key: string | null }) => ({
+      ...target,
+      filePath: `/var/lib/api-whatsapp/media/${target.key}`,
+      storedAt,
+    }));
     uploadMedia.mockRejectedValue(
       new MetaApiError("provider timeout", {
         retryable: true,
@@ -402,15 +455,16 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
-      expect(mediaAssetCreate).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          storageMode: "FILESYSTEM",
-          storageKey: `${TENANT_ID}/${ASSET_ID}`,
-          expiresAt: expect.any(Date),
-        }),
+      const reservation = mediaAssetCreate.mock.calls[0]?.[0] as {
+        data: { id: string; storageKey: string };
+      };
+      expect(reservation.data.storageKey).toBe(`${TENANT_ID}/${reservation.data.id}`);
+      expect(mediaAssetUpdate).toHaveBeenNthCalledWith(1, {
+        where: { id: reservation.data.id },
+        data: { storedAt },
       });
-      expect(mediaAssetUpdate).toHaveBeenCalledWith({
-        where: { id: ASSET_ID },
+      expect(mediaAssetUpdate).toHaveBeenNthCalledWith(2, {
+        where: { id: reservation.data.id },
         data: {
           failedAt: expect.any(Date),
           failureCode: "META_API_ERROR",
@@ -482,10 +536,11 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
-      expect(stage).not.toHaveBeenCalled();
+      expect(targetFor).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
+      expect(stage).not.toHaveBeenCalled();
       expect(uploadMedia).not.toHaveBeenCalled();
       await expectDeleted(temp.filePath);
     } finally {
@@ -504,7 +559,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
-      expect(stage).not.toHaveBeenCalled();
+      expect(targetFor).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
@@ -525,7 +580,7 @@ describe("MediaService", () => {
         }),
       ).rejects.toBeInstanceOf(BadRequestException);
 
-      expect(stage).not.toHaveBeenCalled();
+      expect(targetFor).not.toHaveBeenCalled();
       expect(scan).not.toHaveBeenCalled();
       expect(resolveForTenant).not.toHaveBeenCalled();
       expect(mediaAssetCreate).not.toHaveBeenCalled();
