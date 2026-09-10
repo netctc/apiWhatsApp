@@ -22,7 +22,9 @@ export class HealthController {
   }
 
   @Get("ready")
-  @ApiOperation({ summary: "Check PostgreSQL, Redis, and RabbitMQ readiness" })
+  @ApiOperation({
+    summary: "Check PostgreSQL, Redis, RabbitMQ, and configured media-storage readiness",
+  })
   async ready(): Promise<ReadinessReport> {
     const report = await this.health.ready();
     if (report.status !== "ready") {
