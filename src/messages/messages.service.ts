@@ -13,6 +13,11 @@ import { PrismaService } from "../prisma/prisma.service.js";
 import { TemplatesService } from "../templates/templates.service.js";
 import { CreateMessageDto, OutboundMessageType } from "./dto/create-message.dto.js";
 import { ListMessagesQueryDto } from "./dto/list-messages-query.dto.js";
+import {
+  isMediaMessageType,
+  MediaPayloadError,
+  normalizeMediaPayload,
+} from "./media-payload.util.js";
 import { OutboundPolicyService } from "./outbound-policy.service.js";
 import { deriveTrafficClass } from "./traffic-class.util.js";
 
@@ -43,13 +48,25 @@ export class MessagesService {
     const normalizedTo = normalizePhoneNumber(dto.to);
     const sender = await this.phoneNumbers.resolveForTenant(tenantId, dto.senderId);
     const messageType = this.mapType(dto.type);
+    let persistedPayload = dto.payload;
     let templateCategory: string | null | undefined;
+
+    if (isMediaMessageType(dto.type)) {
+      try {
+        persistedPayload = normalizeMediaPayload(dto.type, dto.payload);
+      } catch (error) {
+        if (error instanceof MediaPayloadError) {
+          throw new BadRequestException(error.message);
+        }
+        throw error;
+      }
+    }
 
     if (dto.type === OutboundMessageType.TEMPLATE) {
       if (!sender.wabaId) {
         throw new UnprocessableEntityException("The selected WhatsApp sender is missing its WABA ID");
       }
-      const template = await this.templates.assertApproved(tenantId, sender.wabaId, dto.payload);
+      const template = await this.templates.assertApproved(tenantId, sender.wabaId, persistedPayload);
       templateCategory = template.category;
     }
 
@@ -68,7 +85,7 @@ export class MessagesService {
             status: MessageStatus.QUEUED,
             to: normalizedTo,
             idempotencyKey: dto.idempotencyKey,
-            payload: this.toJson(dto.payload),
+            payload: this.toJson(persistedPayload),
             statusEvents: {
               create: { status: MessageStatus.QUEUED },
             },
@@ -172,6 +189,14 @@ export class MessagesService {
         return MessageType.TEXT;
       case OutboundMessageType.TEMPLATE:
         return MessageType.TEMPLATE;
+      case OutboundMessageType.IMAGE:
+        return MessageType.IMAGE;
+      case OutboundMessageType.VIDEO:
+        return MessageType.VIDEO;
+      case OutboundMessageType.AUDIO:
+        return MessageType.AUDIO;
+      case OutboundMessageType.DOCUMENT:
+        return MessageType.DOCUMENT;
     }
   }
 

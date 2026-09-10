@@ -5,7 +5,7 @@ import { performance } from "node:perf_hooks";
 import request from "supertest";
 import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
-import { ConsentStatus, MessageStatus } from "../../src/generated/prisma/client.js";
+import { ConsentStatus, MessageStatus, MessageType } from "../../src/generated/prisma/client.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
 
 interface MetaMockCall {
@@ -321,6 +321,52 @@ describe("core messaging integration", () => {
       .expect(200);
     expect(lookup.body.status).toBe(MessageStatus.SUBMITTED);
     expect(lookup.body.providerMessageId).toBe(persisted.providerMessageId);
+  });
+
+  it("delivers an IMAGE message through the same durable pipeline", async () => {
+    const initialMetaCalls = metaCalls.length;
+    const mediaLink = "https://cdn.example.com/integration-delivery.jpg?token=abc";
+
+    const response = await request(app.getHttpServer())
+      .post("/api/v1/messages")
+      .set("X-API-Key", apiKey)
+      .set("Idempotency-Key", `integration-image-${Date.now()}`)
+      .send({
+        to: `+${PHONE}`,
+        type: "IMAGE",
+        payload: {
+          link: mediaLink,
+          caption: "Integration delivery photo",
+        },
+      })
+      .expect(202);
+
+    await waitForSubmitted(prisma, [response.body.messageId]);
+
+    const persisted = await prisma.message.findUniqueOrThrow({
+      where: { id: response.body.messageId },
+    });
+    expect(persisted.type).toBe(MessageType.IMAGE);
+    expect(persisted.status).toBe(MessageStatus.SUBMITTED);
+    expect(persisted.payload).toEqual({
+      link: mediaLink,
+      caption: "Integration delivery photo",
+    });
+
+    expect(metaCalls).toHaveLength(initialMetaCalls + 1);
+    const call = metaCalls.at(-1)!;
+    expect(call.url).toBe(`/v99.0/${senderProviderId}/messages`);
+    expect(call.authorization).toBe("Bearer integration-meta-access-token");
+    expect(call.body).toEqual({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: PHONE,
+      type: "image",
+      image: {
+        link: mediaLink,
+        caption: "Integration delivery photo",
+      },
+    });
   });
 
   it("accepts a concurrent burst with zero HTTP errors and drains every message to SUBMITTED", async () => {

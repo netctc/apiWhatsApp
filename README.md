@@ -2,7 +2,7 @@
 
 Enterprise-grade, multi-tenant WhatsApp Business Platform API for reliable high-volume messaging through Meta Cloud API.
 
-## Current release: 0.14.0
+## Current release: 0.16.0
 
 Engineering language is English for source code, API contracts, tests, operational documentation, logs, and commit messages.
 
@@ -17,6 +17,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - Multiple WhatsApp senders per tenant with runtime secret references
 - WABA template synchronization and lifecycle tracking
 - Local `APPROVED` template enforcement before outbound creation
+- Outbound text plus image/video/audio/document media messaging
 - Server-derived traffic classes: `OTP`, `TRANSACTIONAL`, `MARKETING`
 - Isolated RabbitMQ queues, retry queues, DLQs, and traffic-class prefetch
 - Priority-aware Redis sender capacity reservation
@@ -141,7 +142,20 @@ GET  /api/v1/messages
 GET  /api/v1/messages/{messageId}
 ```
 
-Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text requires an open customer-service window.
+Supported outbound types currently include:
+
+```text
+TEXT
+TEMPLATE
+IMAGE
+VIDEO
+AUDIO
+DOCUMENT
+```
+
+Template messages require explicit `OPTED_IN` consent and an approved synchronized template. Free-form text and media messages require an open customer-service window.
+
+Media messages accept exactly one existing Meta media `id` or an absolute HTTPS `link`. Image/video/document can carry a bounded caption; document can also carry a bounded filename. See `docs/media-messaging.md` for the full validation and storage boundary.
 
 Outbound lifecycle:
 
@@ -191,7 +205,7 @@ Clients cannot choose priority. The server derives traffic class from trusted sy
 | `AUTHENTICATION` template | `OTP` |
 | `MARKETING` template | `MARKETING` |
 | `UTILITY` / other approved template | `TRANSACTIONAL` |
-| Free-form service message | `TRANSACTIONAL` |
+| Free-form text/media service message | `TRANSACTIONAL` |
 
 Default queues:
 
@@ -308,7 +322,7 @@ See `docs/observability.md` and `ops/prometheus-alerts.yml`.
 
 ## Integration and load-smoke gate
 
-Release `0.14.0` adds a real-infrastructure CI gate.
+Release `0.14.0` added the real-infrastructure CI gate; `0.16.0` extends it with media delivery coverage.
 
 The integration job starts:
 
@@ -340,7 +354,7 @@ HTTP POST /messages
   -> SUBMITTED
 ```
 
-It also proves idempotency and trace persistence, then sends a default 50-message concurrent burst and requires:
+Coverage includes both text and image messages. It also proves idempotency and trace persistence, then sends a default 50-message concurrent burst and requires:
 
 - zero transport errors;
 - HTTP 202 for every accept;
@@ -417,13 +431,16 @@ See `.env.example` for the complete documented configuration set.
 
 Never commit production credentials or access tokens.
 
+## Release metadata note
+
+Administrative audit coverage was merged in PR #16 while package/OpenAPI metadata remained at `0.14.0`. Release `0.16.0` corrects that repository metadata drift and includes the media messaging foundation; repository history is not rewritten.
+
 ## Next implementation slices
 
 - production capacity / soak / failure-injection test expansion
 - OpenTelemetry span export and tracing-backend integration
-- additional administrative audit coverage
 - provider-backed secret stores beyond environment references
-- media messages and media storage
+- media upload/object storage/scanning and retention
 - agent inbox and conversation assignment
 
 ## Repository workflow
