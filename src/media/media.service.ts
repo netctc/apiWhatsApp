@@ -6,6 +6,7 @@ import {
   Logger,
   PayloadTooLargeException,
   ServiceUnavailableException,
+  UnprocessableEntityException,
 } from "@nestjs/common";
 import { isUUID } from "class-validator";
 import { MetaApiError } from "../meta/meta-api.error.js";
@@ -15,6 +16,10 @@ import {
   assertMediaContentSignature,
   MediaContentSignatureError,
 } from "./media-content-signature.js";
+import {
+  MediaMalwareScanError,
+  MediaMalwareScannerService,
+} from "./media-malware-scanner.service.js";
 import {
   MediaUploadPolicyError,
   resolveMediaUploadPolicy,
@@ -33,6 +38,7 @@ export class MediaService {
   constructor(
     private readonly senderResolver: MetaSenderResolverService,
     private readonly metaMedia: MetaMediaClient,
+    private readonly malwareScanner: MediaMalwareScannerService,
   ) {}
 
   async upload(
@@ -65,6 +71,21 @@ export class MediaService {
       } catch (error) {
         if (error instanceof MediaContentSignatureError) {
           throw new BadRequestException(error.message);
+        }
+        throw error;
+      }
+
+      try {
+        await this.malwareScanner.scan(file.path);
+      } catch (error) {
+        if (error instanceof MediaMalwareScanError) {
+          if (error.reason === "MALWARE_DETECTED") {
+            this.logger.warn("Media upload rejected by malware scanner");
+            throw new UnprocessableEntityException("Media file was rejected by security scanning");
+          }
+
+          this.logger.error(`Media malware scanner failed closed reason=${error.reason}`);
+          throw new ServiceUnavailableException("Media security scanning is unavailable");
         }
         throw error;
       }
