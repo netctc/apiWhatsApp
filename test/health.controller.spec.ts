@@ -22,13 +22,14 @@ describe("HealthController", () => {
     expect(ready).not.toHaveBeenCalled();
   });
 
-  it("returns a ready dependency report without changing the status", async () => {
+  it("returns a ready dependency report including disabled media storage without changing the status", async () => {
     const report = {
       status: "ready",
       dependencies: {
         postgres: { status: "up", durationMs: 1 },
         redis: { status: "up", durationMs: 2 },
         rabbitmq: { status: "up", durationMs: 3 },
+        mediaStorage: { status: "up", mode: "disabled", durationMs: 0 },
       },
       timestamp: "2026-09-09T20:00:00.000Z",
     };
@@ -37,13 +38,24 @@ describe("HealthController", () => {
     await expect(controller.ready()).resolves.toEqual(report);
   });
 
-  it("raises HTTP 503 with the dependency report when readiness fails", async () => {
+  it("raises HTTP 503 with the dependency report when media storage is below its capacity reserve", async () => {
     const report = {
       status: "not_ready",
       dependencies: {
         postgres: { status: "up", durationMs: 1 },
-        redis: { status: "down", durationMs: 2, error: "unavailable" },
+        redis: { status: "up", durationMs: 2 },
         rabbitmq: { status: "up", durationMs: 3 },
+        mediaStorage: {
+          status: "down",
+          mode: "filesystem",
+          durationMs: 1,
+          error: "low_capacity",
+          totalBytes: 1000,
+          freeBytes: 10,
+          freePercent: 1,
+          minimumFreeBytes: 100,
+          minimumFreePercent: 5,
+        },
       },
       timestamp: "2026-09-09T20:00:00.000Z",
     };
