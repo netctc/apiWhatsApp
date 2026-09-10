@@ -31,7 +31,7 @@ Engineering language is English for source code, API contracts, tests, operation
 - Live campaign orchestration and WhatsApp delivery analytics
 - Process liveness, dependency readiness, and tenant operations diagnostics
 - Prometheus-compatible metrics and baseline alert rules
-- W3C trace/request correlation across HTTP -> outbox -> RabbitMQ -> worker
+- W3C trace/request correlation across HTTP -> outbox -> RabbitMQ -> worker, with optional bounded OTLP/HTTP JSON export for HTTP server and outbound worker spans
 - Committed npm lockfile, runtime vulnerability gate, and reproducible Docker build
 - Real CI integration test against PostgreSQL, Redis, RabbitMQ, API, worker, and controlled external-service seams
 - Concurrent acceptance/drain load smoke gate
@@ -62,6 +62,8 @@ flowchart LR
     MKT --> Worker
     Worker --> Rate[Redis Rate Limiter]
     Rate --> Meta
+    API -. optional OTLP .-> TraceCollector[OTLP Trace Collector]
+    Worker -. optional OTLP .-> TraceCollector
     Meta --> WhatsApp[WhatsApp]
     Meta --> Webhook[Signed Webhook]
     Webhook --> DB
@@ -93,6 +95,7 @@ Campaigns reuse the normal message pipeline. They cannot bypass tenant ownership
 - Meta app secret and webhook verify token
 - Optional ClamAV service when malware scanning is enabled
 - Optional protected persistent/shared filesystem or private S3-compatible bucket when media binary retention is enabled
+- Optional OTLP/HTTP JSON trace collector when trace export is enabled
 
 ## Local setup
 
@@ -442,7 +445,16 @@ Authorization: Bearer <METRICS_BEARER_TOKEN>
 
 Metrics labels are bounded and do not include tenant IDs, phones, message IDs, campaign IDs, payloads, raw dynamic paths, or user-provided strings.
 
-Valid W3C `traceparent` and bounded `x-request-id` values propagate through HTTP, transactional outbox, RabbitMQ retry/DLQ flow, and outbound worker correlation. Span export to an external tracing backend remains a future slice.
+Valid W3C `traceparent` and bounded `x-request-id` values propagate through HTTP, transactional outbox, RabbitMQ retry/DLQ flow, and outbound worker correlation. Optional OTLP/HTTP JSON export emits completed HTTP server spans and outbound worker consumer spans while preserving the same trace IDs. Collector failure is telemetry-only and does not affect application readiness or message processing.
+
+Enable trace export with an exact trace endpoint:
+
+```text
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otel-collector.example.net/v1/traces
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json
+```
+
+or configure `OTEL_EXPORTER_OTLP_ENDPOINT` and the exporter appends `/v1/traces`. Batch/queue/timeout controls are bounded and documented in `.env.example`. Exported attributes deliberately exclude tenant IDs, phones, message IDs, request IDs, raw URLs, payloads, storage keys and dynamic error text.
 
 See `docs/observability.md` and `ops/prometheus-alerts.yml`.
 
@@ -456,9 +468,12 @@ Core coverage proves:
 text/image message -> Message + Outbox -> RabbitMQ -> worker -> Redis -> Meta mock -> SUBMITTED
 multipart media -> temp -> signature/scan -> MediaAsset planned key -> retained filesystem or S3 bytes -> Meta mock /media -> mediaId
 expired retained MediaAsset -> backend binary delete -> registry delete -> detail 404
+traceparent -> completed Nest HTTP server span -> OTLP/HTTP JSON collector mock
 ```
 
 S3 coverage additionally requires the signed object PUT to complete before Meta upload, validates exact bytes/hash/content length, checks storage readiness and tenant retained-byte operations evidence, and then proves signed object deletion before expired registry metadata is removed.
+
+OTLP coverage additionally requires exact trace continuation: the exported HTTP span uses the trace ID supplied by a valid W3C parent, the new span ID returned in the response `traceparent`, and the incoming parent span ID. Unit coverage validates outbound worker consumer spans, sampled-flag suppression, header precedence and fail-open collector behavior.
 
 Inbox coverage proves:
 
@@ -522,6 +537,18 @@ RABBITMQ_URL
 API_KEY_HASH_SECRET
 HEALTH_DEPENDENCY_TIMEOUT_MS
 METRICS_BEARER_TOKEN
+OTEL_SERVICE_NAME
+OTEL_EXPORTER_OTLP_ENDPOINT
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+OTEL_EXPORTER_OTLP_PROTOCOL
+OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+OTEL_EXPORTER_OTLP_HEADERS
+OTEL_EXPORTER_OTLP_TRACES_HEADERS
+OTEL_EXPORTER_OTLP_TIMEOUT
+OTEL_EXPORTER_OTLP_TRACES_TIMEOUT
+OTEL_BSP_MAX_QUEUE_SIZE
+OTEL_BSP_MAX_EXPORT_BATCH_SIZE
+OTEL_BSP_SCHEDULE_DELAY
 META_GRAPH_API_VERSION
 META_APP_SECRET
 META_WEBHOOK_VERIFY_TOKEN
@@ -560,7 +587,7 @@ Never commit production credentials or access tokens.
 ## Next implementation slices
 
 - production capacity / soak / new incident-driven failure-injection test expansion
-- OpenTelemetry span export and tracing-backend integration
+- OpenTelemetry client/producer auto-instrumentation, configurable local sampling and tracing-backend deployment guidance
 - provider-backed secret stores beyond environment references
 - asynchronous media quarantine/reconciliation, deeper content validation, and advanced object lifecycle/legal-hold policies
 - realtime inbox delivery (SSE/WebSocket), teams/skills, routing policies, SLA/escalation and human-agent session/SSO integration
