@@ -24,7 +24,7 @@ export class MetaMediaClient {
     sender: MetaSenderContext,
   ): Promise<MetaMediaUploadResult> {
     const graphVersion = this.required("META_GRAPH_API_VERSION");
-    const timeoutMs = Number(this.config.get("META_HTTP_TIMEOUT_MS") ?? 15000);
+    const timeoutMs = this.uploadTimeoutMs();
 
     if (!/^v\d+\.\d+$/.test(graphVersion)) {
       throw new Error("META_GRAPH_API_VERSION must use the format vNN.N");
@@ -79,6 +79,14 @@ export class MetaMediaClient {
     }
 
     return { mediaId };
+  }
+
+  private uploadTimeoutMs(): number {
+    const value = Number(this.config.get("META_MEDIA_UPLOAD_TIMEOUT_MS") ?? 120000);
+    if (!Number.isFinite(value) || value < 1000 || value > 600000) {
+      throw new Error("META_MEDIA_UPLOAD_TIMEOUT_MS must be between 1000 and 600000 milliseconds");
+    }
+    return Math.floor(value);
   }
 
   private required(name: string): string {
