@@ -259,11 +259,29 @@ This closes a failure mode where a redelivered final-attempt job could previousl
 
 The test intentionally kills the worker while the second HTTP request is pending and before the Meta test double accepts it. If an external provider has already accepted a request and the worker dies before persisting the provider message ID, exactly-once delivery cannot be guaranteed by a local database lease alone; that ambiguous network boundary still requires provider-side idempotency or reconciliation where available.
 
+## Webhook burst during active campaigns
+
+The final concurrency gate runs an active MARKETING campaign while issuing a signed inbound webhook burst across the same contacts. The campaign processor is deliberately constrained to one recipient per poll so outbound campaign generation remains active while webhook ingestion and asynchronous processing run concurrently.
+
+The suite uses 24 opted-in contacts and 48 signed inbound message webhooks, two per campaign contact. It exercises campaign recipient claims, message creation, transactional outbox publication, RabbitMQ, the outbound worker, Redis sender limiting, the controlled Meta test double, webhook signature verification, `WebhookEvent` persistence, inbound message transactions, contact activity, and inbox conversation counters.
+
+It requires:
+
+- all 48 webhook POSTs to return HTTP 200 with p95 below `INTEGRATION_WEBHOOK_BURST_P95_MS` (default 3000 ms);
+- the campaign to remain `RUNNING` immediately after webhook acceptance, proving the two pipelines overlapped rather than executing sequentially;
+- all 48 webhook events to process exactly once without processing errors or retries;
+- all 48 inbound messages to persist as `RECEIVED` and conversation unread counts to total 48;
+- all 24 campaign recipients to be claimed once, queue successfully, and produce MARKETING messages that reach `SUBMITTED`;
+- the campaign to finish `COMPLETED` with zero skipped, failed, or cancelled recipients;
+- Meta to receive exactly 24 outbound campaign requests.
+
+This verifies that webhook ingestion/processing and campaign production make forward progress concurrently on the same tenant/contact set without lost work, duplicate campaign claims, or degraded inbox accounting.
+
 ## What the CI smoke test is not
 
-The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
+The 50-message burst and campaign/webhook concurrency scenario are regression/smoke gates, **not a production capacity certification**.
 
-Do not use the CI p95 result to claim a production throughput SLA. GitHub-hosted runners have variable CPU/network scheduling and run all dependencies on one runner VM.
+Do not use CI p95 results to claim a production throughput SLA. GitHub-hosted runners have variable CPU/network scheduling and run all dependencies on one runner VM.
 
 For release/capacity certification use a dedicated environment with:
 
@@ -298,11 +316,11 @@ Measure at minimum:
 - process memory/CPU;
 - webhook processing lag under concurrent outbound load.
 
-## Remaining failure-injection scenarios
+## Failure-injection coverage status
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, Redis rate-limiter recovery, recovery across the API post-commit/pre-publish restart window, and replacement-worker recovery after abrupt termination during an active final-attempt processing lease. Further failure-injection coverage should be added for:
+The current real-infrastructure CI gate covers every failure/concurrency scenario tracked in this runbook: the normal durable path, Meta transient/permanent failures, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery statuses, RabbitMQ outbox-publication recovery, Redis rate-limiter recovery, API post-commit/pre-publish restart recovery, replacement-worker recovery after abrupt termination during an active final-attempt lease, and webhook burst isolation during active campaign execution.
 
-- webhook burst while campaigns are running.
+No additional failure-injection scenario is currently listed here. New production incidents or newly identified race/failure modes should be added as isolated reproducible scenarios before expanding this list. Production capacity certification remains a separate activity from these CI smoke and resilience gates.
 
 ## Local execution example
 
