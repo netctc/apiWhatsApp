@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { APP_USER_AGENT } from "../version.js";
 import { MetaApiError } from "./meta-api.error.js";
 import { metaGraphUrl } from "./meta-graph-url.util.js";
 import { MetaSenderResolverService } from "./meta-sender-resolver.service.js";
@@ -100,7 +101,7 @@ export class MetaTemplateClient {
         method: "GET",
         headers: {
           Authorization: `Bearer ${accessToken}`,
-          "User-Agent": "apiWhatsApp/0.14",
+          "User-Agent": APP_USER_AGENT,
         },
         signal: AbortSignal.timeout(timeoutMs),
       });
