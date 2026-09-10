@@ -8,7 +8,12 @@ import {
 
 const TENANT_ID = "123e4567-e89b-42d3-a456-426614174000";
 const ASSET_ID = "123e4567-e89b-42d3-a456-426614174001";
-const STORAGE_ENV_KEYS = ["MEDIA_BINARY_STORAGE_MODE", "MEDIA_FILESYSTEM_STORAGE_PATH"] as const;
+const STORAGE_ENV_KEYS = [
+  "MEDIA_BINARY_STORAGE_MODE",
+  "MEDIA_FILESYSTEM_STORAGE_PATH",
+  "MEDIA_FILESYSTEM_MIN_FREE_BYTES",
+  "MEDIA_FILESYSTEM_MIN_FREE_PERCENT",
+] as const;
 
 describe("MediaBinaryStorageService", () => {
   const service = new MediaBinaryStorageService();
@@ -31,7 +36,7 @@ describe("MediaBinaryStorageService", () => {
     }
   });
 
-  it("plans no storage and leaves the temporary upload in place when binary retention is disabled", async () => {
+  it("plans no storage and reports readiness up when binary retention is disabled", async () => {
     delete process.env.MEDIA_BINARY_STORAGE_MODE;
 
     const target = service.targetFor(TENANT_ID, ASSET_ID);
@@ -41,6 +46,10 @@ describe("MediaBinaryStorageService", () => {
       key: null,
       filePath: "/tmp/source",
       storedAt: null,
+    });
+    await expect(service.diagnostics()).resolves.toEqual({
+      status: "up",
+      mode: "disabled",
     });
   });
 
@@ -56,6 +65,8 @@ describe("MediaBinaryStorageService", () => {
     await writeFile(sourcePath, bytes);
     process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
     process.env.MEDIA_FILESYSTEM_STORAGE_PATH = root;
+    process.env.MEDIA_FILESYSTEM_MIN_FREE_BYTES = "0";
+    process.env.MEDIA_FILESYSTEM_MIN_FREE_PERCENT = "0";
 
     try {
       const target = service.targetFor(TENANT_ID, ASSET_ID);
@@ -73,6 +84,18 @@ describe("MediaBinaryStorageService", () => {
       expect((await stat(staged.filePath)).mode & 0o777).toBe(0o600);
       expect((await stat(join(root, TENANT_ID))).mode & 0o777).toBe(0o700);
 
+      await expect(service.diagnostics()).resolves.toEqual(
+        expect.objectContaining({
+          status: "up",
+          mode: "filesystem",
+          totalBytes: expect.any(Number),
+          freeBytes: expect.any(Number),
+          freePercent: expect.any(Number),
+          minimumFreeBytes: 0,
+          minimumFreePercent: 0,
+        }),
+      );
+
       await service.discard(staged.mode, staged.key);
       await expect(access(staged.filePath)).rejects.toThrow();
       await expect(service.discard(staged.mode, staged.key)).resolves.toBeUndefined();
@@ -80,6 +103,64 @@ describe("MediaBinaryStorageService", () => {
       await rm(root, { recursive: true, force: true });
       await rm(sourceDir, { recursive: true, force: true });
     }
+  });
+
+  it("reports low capacity when either configured reserve threshold is breached", async () => {
+    const root = await mkdtemp(join(tmpdir(), "api-whatsapp-media-storage-"));
+    process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
+    process.env.MEDIA_FILESYSTEM_STORAGE_PATH = root;
+    process.env.MEDIA_FILESYSTEM_MIN_FREE_BYTES = String(Number.MAX_SAFE_INTEGER);
+    process.env.MEDIA_FILESYSTEM_MIN_FREE_PERCENT = "0";
+
+    try {
+      await expect(service.diagnostics()).resolves.toEqual(
+        expect.objectContaining({
+          status: "down",
+          mode: "filesystem",
+          error: "low_capacity",
+          minimumFreeBytes: Number.MAX_SAFE_INTEGER,
+          minimumFreePercent: 0,
+        }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports invalid diagnostic configuration without exposing a path", async () => {
+    process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
+    process.env.MEDIA_FILESYSTEM_STORAGE_PATH = "relative/media";
+
+    await expect(service.diagnostics()).resolves.toEqual({
+      status: "down",
+      mode: "filesystem",
+      error: "not_configured",
+    });
+
+    process.env.MEDIA_BINARY_STORAGE_MODE = "unknown";
+    await expect(service.diagnostics()).resolves.toEqual({
+      status: "down",
+      mode: "invalid",
+      error: "not_configured",
+    });
+  });
+
+  it("reports an unavailable filesystem when the configured root cannot be accessed", async () => {
+    process.env.MEDIA_BINARY_STORAGE_MODE = "filesystem";
+    process.env.MEDIA_FILESYSTEM_STORAGE_PATH = join(
+      tmpdir(),
+      `api-whatsapp-missing-storage-${process.pid}-${Date.now()}`,
+    );
+    process.env.MEDIA_FILESYSTEM_MIN_FREE_BYTES = "0";
+    process.env.MEDIA_FILESYSTEM_MIN_FREE_PERCENT = "0";
+
+    await expect(service.diagnostics()).resolves.toEqual({
+      status: "down",
+      mode: "filesystem",
+      error: "unavailable",
+      minimumFreeBytes: 0,
+      minimumFreePercent: 0,
+    });
   });
 
   it("fails closed while planning when filesystem mode has no absolute storage root", () => {
