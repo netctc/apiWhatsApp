@@ -189,6 +189,23 @@ The real-database integration coverage uses independent Prisma clients to exerci
 
 This closes the race where both processors could previously read the same pre-transition status before entering their separate transactions and a slower `sent` transaction could overwrite a committed `read` state.
 
+## RabbitMQ outage during outbox publication
+
+The transactional outbox gate deliberately starts the API with the configured RabbitMQ endpoint replaced by an unreachable loopback port. The HTTP message request must still return `202` because the `Message` and `OutboxEvent` are committed atomically in PostgreSQL before publication is attempted.
+
+While RabbitMQ is unavailable the suite requires:
+
+- the accepted message to remain durably `QUEUED`;
+- no provider message ID and no Meta provider call;
+- the outbox event to remain `publishedAt = null`;
+- the outbox processing lease to be released after the failed publish attempt;
+- the connection failure to be retained in `lastError`;
+- `nextAttemptAt` to move forward according to the bounded outbox backoff policy.
+
+The test then restores the real CI RabbitMQ URL and starts the real outbound worker. Without rewriting the message or outbox row, the normal outbox poller must retry publication, receive publisher confirmation, clear the previous error, mark the event published, and allow the worker to submit the original logical message exactly once to the Meta test double.
+
+This proves temporary RabbitMQ unavailability does not lose accepted work and does not require application-level client replay after the HTTP request has already committed.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -230,9 +247,8 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, and monotonic delayed/out-of-order delivery status handling. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, and recovery from RabbitMQ unavailability during outbox publication. Further failure-injection suites should be added incrementally for:
 
-- RabbitMQ unavailable during outbox publication;
 - Redis unavailable during outbound rate limiting;
 - worker termination while a processing lease is active;
 - API termination after DB commit but before outbox publish;
