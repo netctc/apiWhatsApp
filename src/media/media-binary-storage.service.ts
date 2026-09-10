@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 import { Injectable } from "@nestjs/common";
 
 const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024;
-const DEFAULT_MIN_FREE_PERCENT = 10;
+const DEFAULT_MIN_FREE_PERCENT = 5;
 
 export type MediaBinaryStorageMode = "DISABLED" | "FILESYSTEM";
 
