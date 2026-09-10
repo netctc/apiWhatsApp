@@ -41,7 +41,7 @@ export class MessageDispatcherService {
       }
 
       if (claim.message.status === MessageStatus.PROCESSING) {
-        return { action: "retry", reason: "Message is currently leased by another worker" };
+        return { action: "defer", reason: "Message is currently leased by another worker" };
       }
 
       return { action: "ack" };
