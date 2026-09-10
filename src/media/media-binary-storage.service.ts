@@ -37,8 +37,8 @@ export class MediaBinaryStorageService {
     const key = `${tenantId}/${assetId}`;
     const targetPath = this.pathForKey(root, key);
 
-    await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
     try {
+      await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
       await pipeline(
         createReadStream(sourcePath),
         createWriteStream(targetPath, { flags: "wx", mode: 0o600 }),
