@@ -12,6 +12,10 @@ import { MetaApiError } from "../meta/meta-api.error.js";
 import { MetaMediaClient } from "../meta/meta-media.client.js";
 import { MetaSenderResolverService } from "../meta/meta-sender-resolver.service.js";
 import {
+  assertMediaContentSignature,
+  MediaContentSignatureError,
+} from "./media-content-signature.js";
+import {
   MediaUploadPolicyError,
   resolveMediaUploadPolicy,
 } from "./media-upload.policy.js";
@@ -51,6 +55,15 @@ export class MediaService {
           if (error.reason === "FILE_TOO_LARGE") {
             throw new PayloadTooLargeException(error.message);
           }
+          throw new BadRequestException(error.message);
+        }
+        throw error;
+      }
+
+      try {
+        await assertMediaContentSignature(file.path, policy.mimeType);
+      } catch (error) {
+        if (error instanceof MediaContentSignatureError) {
           throw new BadRequestException(error.message);
         }
         throw error;
