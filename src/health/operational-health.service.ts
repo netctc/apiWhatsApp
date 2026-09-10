@@ -2,6 +2,10 @@ import { Injectable, OnModuleDestroy } from "@nestjs/common";
 import amqp, { type ChannelModel } from "amqplib";
 import { Redis } from "ioredis";
 import { Prisma } from "../generated/prisma/client.js";
+import {
+  MediaBinaryStorageService,
+  type MediaBinaryStorageDiagnostics,
+} from "../media/media-binary-storage.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
 export type DependencyHealthStatus = "up" | "down";
@@ -19,6 +23,7 @@ export interface ReadinessReport {
     postgres: DependencyHealthCheck;
     redis: DependencyHealthCheck;
     rabbitmq: DependencyHealthCheck;
+    mediaStorage: MediaBinaryStorageDiagnostics;
   };
   timestamp: string;
 }
@@ -32,7 +37,10 @@ export class OperationalHealthService implements OnModuleDestroy {
   private rabbitConnection?: ChannelModel;
   private rabbitConnectionPromise?: Promise<ChannelModel>;
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly mediaStorage: MediaBinaryStorageService,
+  ) {
     const redisUrl = process.env.REDIS_URL;
     if (redisUrl) {
       this.redis = new Redis(redisUrl, {
@@ -54,18 +62,22 @@ export class OperationalHealthService implements OnModuleDestroy {
 
   async ready(): Promise<ReadinessReport> {
     const timeoutMs = this.timeoutMs();
-    const [postgres, redis, rabbitmq] = await Promise.all([
+    const [postgres, redis, rabbitmq, mediaStorage] = await Promise.all([
       this.checkDependency(() => this.checkPostgres(), timeoutMs),
       this.checkDependency(() => this.checkRedis(), timeoutMs),
       this.checkDependency(() => this.checkRabbitMq(), timeoutMs),
+      this.mediaStorage.diagnostics(),
     ]);
 
     const ready =
-      postgres.status === "up" && redis.status === "up" && rabbitmq.status === "up";
+      postgres.status === "up" &&
+      redis.status === "up" &&
+      rabbitmq.status === "up" &&
+      mediaStorage.status === "up";
 
     return {
       status: ready ? "ready" : "not_ready",
-      dependencies: { postgres, redis, rabbitmq },
+      dependencies: { postgres, redis, rabbitmq, mediaStorage },
       timestamp: new Date().toISOString(),
     };
   }
