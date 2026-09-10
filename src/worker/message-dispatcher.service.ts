@@ -1,8 +1,20 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
+import { performance } from "node:perf_hooks";
 import { Message, MessageStatus, Prisma } from "../generated/prisma/client.js";
 import { MetaApiError } from "../meta/meta-api.error.js";
-import { MetaSenderResolverService } from "../meta/meta-sender-resolver.service.js";
-import { MetaWhatsAppClient } from "../meta/meta-whatsapp.client.js";
+import {
+  MetaSenderResolverService,
+  type MetaSenderContext,
+} from "../meta/meta-sender-resolver.service.js";
+import {
+  MetaWhatsAppClient,
+  type MetaSendMessageResult,
+} from "../meta/meta-whatsapp.client.js";
+import { OtlpTraceExporterService } from "../observability/otlp-trace-exporter.service.js";
+import {
+  TraceContextService,
+  type TraceContext,
+} from "../observability/trace-context.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { OutboundQueueJob, QueueProcessingResult } from "../queue/messaging-queue.service.js";
 import { DistributedRateLimiterService } from "./distributed-rate-limiter.service.js";
@@ -26,6 +38,8 @@ export class MessageDispatcherService {
     private readonly meta: MetaWhatsAppClient,
     private readonly senderResolver: MetaSenderResolverService,
     private readonly rateLimiter: DistributedRateLimiterService,
+    @Optional() private readonly traceContext?: TraceContextService,
+    @Optional() private readonly otlp?: OtlpTraceExporterService,
   ) {}
 
   async dispatch(job: OutboundQueueJob): Promise<QueueProcessingResult> {
@@ -89,7 +103,7 @@ export class MessageDispatcherService {
     }
 
     try {
-      const result = await this.meta.sendMessage(message, sender);
+      const result = await this.sendToMeta(message, sender);
       await this.prisma.message.update({
         where: { id: message.id },
         data: {
@@ -147,6 +161,80 @@ export class MessageDispatcherService {
       "RETRY_EXHAUSTED",
       reason ?? `Outbound retry policy exhausted after ${job.attempt + 1} queue attempts`,
     );
+  }
+
+  private async sendToMeta(
+    message: Message,
+    sender: MetaSenderContext,
+  ): Promise<MetaSendMessageResult> {
+    const parent = this.traceContext?.carrier();
+    if (!parent || !this.traceContext) {
+      return this.meta.sendMessage(message, sender);
+    }
+
+    return this.traceContext.runFromParent(parent, async () => {
+      const context = this.traceContext?.current();
+      const startedAtUnixNano = BigInt(Date.now()) * 1_000_000n;
+      const startedAt = performance.now();
+      try {
+        const result = await this.meta.sendMessage(message, sender);
+        this.recordMetaClientSpan(
+          context,
+          message,
+          startedAtUnixNano,
+          startedAt,
+          "success",
+          undefined,
+          0,
+        );
+        return result;
+      } catch (error) {
+        const metaError = error instanceof MetaApiError ? error : undefined;
+        this.recordMetaClientSpan(
+          context,
+          message,
+          startedAtUnixNano,
+          startedAt,
+          metaError ? (metaError.retryable ? "retryable_error" : "permanent_error") : "exception",
+          metaError?.httpStatus,
+          2,
+        );
+        throw error;
+      }
+    });
+  }
+
+  private recordMetaClientSpan(
+    context: TraceContext | undefined,
+    message: Message,
+    startedAtUnixNano: bigint,
+    startedAt: number,
+    result: "success" | "retryable_error" | "permanent_error" | "exception",
+    httpStatus: number | undefined,
+    statusCode: 0 | 2,
+  ): void {
+    if (!context) {
+      return;
+    }
+    const durationNano = BigInt(
+      Math.max(0, Math.round((performance.now() - startedAt) * 1_000_000)),
+    );
+    this.otlp?.recordSpan({
+      context,
+      name: "meta.whatsapp send_message",
+      kind: 3,
+      startTimeUnixNano: startedAtUnixNano,
+      endTimeUnixNano: startedAtUnixNano + durationNano,
+      attributes: {
+        "http.request.method": "POST",
+        "app.provider": "meta_whatsapp",
+        "app.operation": "send_message",
+        "app.message.traffic_class": message.trafficClass,
+        "app.meta.result": result,
+        ...(httpStatus !== undefined ? { "http.response.status_code": httpStatus } : {}),
+      },
+      statusCode,
+    });
   }
 
   private async claimMessage(messageId: string): Promise<{ claimed: boolean; message: Message | null }> {
