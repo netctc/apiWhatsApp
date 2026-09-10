@@ -134,18 +134,19 @@ describe("MediaService", () => {
           failureCode: null,
         }),
       });
-      expect(result).toEqual(expect.objectContaining({
-        assetId: ASSET_ID,
+      expect(result).toEqual({
         mediaId: "media-123",
         senderId: SENDER_ID,
         category: "IMAGE",
         mimeType: "image/jpeg",
         size: temp.size,
-        scanMode: "DISABLED",
-        scanStatus: "NOT_SCANNED",
-        state: "ACTIVE",
-      }));
-      expect(result.expiresAt.getTime() - result.providerUploadedAt.getTime()).toBe(30 * 24 * 60 * 60 * 1000);
+      });
+      const completion = mediaAssetUpdate.mock.calls[0]?.[0] as {
+        data: { providerUploadedAt: Date; expiresAt: Date };
+      };
+      expect(completion.data.expiresAt.getTime() - completion.data.providerUploadedAt.getTime()).toBe(
+        30 * 24 * 60 * 60 * 1000,
+      );
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
@@ -158,7 +159,7 @@ describe("MediaService", () => {
     const temp = await createTempFile();
 
     try {
-      const result = await service.upload(TENANT_ID, {}, {
+      await service.upload(TENANT_ID, {}, {
         path: temp.filePath,
         mimetype: "image/jpeg",
         size: temp.size,
@@ -167,7 +168,12 @@ describe("MediaService", () => {
       expect(mediaAssetCreate).toHaveBeenCalledWith({
         data: expect.objectContaining({ scanMode: "CLAMAV", scanStatus: "CLEAN" }),
       });
-      expect(result.expiresAt.getTime() - result.providerUploadedAt.getTime()).toBe(7 * 24 * 60 * 60 * 1000);
+      const completion = mediaAssetUpdate.mock.calls[0]?.[0] as {
+        data: { providerUploadedAt: Date; expiresAt: Date };
+      };
+      expect(completion.data.expiresAt.getTime() - completion.data.providerUploadedAt.getTime()).toBe(
+        7 * 24 * 60 * 60 * 1000,
+      );
     } finally {
       await rm(temp.directory, { recursive: true, force: true });
     }
