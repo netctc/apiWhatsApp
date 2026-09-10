@@ -75,37 +75,54 @@ enum CampaignRecipientStatus {
   CANCELLED
 }
 
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+}
+
+enum ConversationPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
 model Tenant {
-  id           String                @id @default(uuid()) @db.Uuid
-  name         String
-  slug         String                @unique
-  status       TenantStatus          @default(ACTIVE)
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
-  apiKeys      ApiKey[]
-  contacts     Contact[]
-  messages     Message[]
-  consents     ContactConsentEvent[]
-  phoneNumbers WhatsAppPhoneNumber[]
-  templates    MessageTemplate[]
-  campaigns    Campaign[]
-  segments     ContactSegment[]
-  auditLogs    AuditLog[]
+  id                String                @id @default(uuid()) @db.Uuid
+  name              String
+  slug              String                @unique
+  status            TenantStatus          @default(ACTIVE)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  apiKeys           ApiKey[]
+  contacts          Contact[]
+  messages          Message[]
+  consents          ContactConsentEvent[]
+  phoneNumbers      WhatsAppPhoneNumber[]
+  templates         MessageTemplate[]
+  campaigns         Campaign[]
+  segments          ContactSegment[]
+  auditLogs         AuditLog[]
+  inboxAgents       InboxAgent[]
+  conversations     Conversation[]
+  conversationNotes ConversationNote[]
 }
 
 model ApiKey {
-  id         String     @id @default(uuid()) @db.Uuid
-  tenantId   String     @db.Uuid
-  name       String
-  prefix     String
-  keyHash    String     @unique
-  scopes     String[]
-  active     Boolean    @default(true)
-  lastUsedAt DateTime?
-  createdAt  DateTime   @default(now())
-  revokedAt  DateTime?
-  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  auditLogs  AuditLog[] @relation("AuditActorApiKey")
+  id                String             @id @default(uuid()) @db.Uuid
+  tenantId          String             @db.Uuid
+  name              String
+  prefix            String
+  keyHash           String             @unique
+  scopes            String[]
+  active            Boolean            @default(true)
+  lastUsedAt        DateTime?
+  createdAt         DateTime           @default(now())
+  revokedAt         DateTime?
+  tenant            Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  auditLogs         AuditLog[]         @relation("AuditActorApiKey")
+  conversationNotes ConversationNote[] @relation("ConversationNoteActor")
 
   @@index([tenantId, active])
   @@index([prefix])
@@ -131,21 +148,22 @@ model AuditLog {
 }
 
 model WhatsAppPhoneNumber {
-  id                    String     @id @default(uuid()) @db.Uuid
-  tenantId              String     @db.Uuid
-  providerPhoneNumberId String     @unique
+  id                    String         @id @default(uuid()) @db.Uuid
+  tenantId              String         @db.Uuid
+  providerPhoneNumberId String         @unique
   wabaId                 String?
   displayPhoneNumber     String?
   verifiedName           String?
   credentialRef          String
   rateLimitPerSecond     Int?
-  active                 Boolean    @default(true)
-  isDefault              Boolean    @default(false)
-  createdAt              DateTime   @default(now())
-  updatedAt              DateTime   @updatedAt
-  tenant                 Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  active                 Boolean        @default(true)
+  isDefault              Boolean        @default(false)
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+  tenant                 Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   messages               Message[]
   campaigns              Campaign[]
+  conversations          Conversation[]
 
   @@index([tenantId, active, isDefault])
   @@index([tenantId, wabaId, active])
@@ -196,6 +214,7 @@ model Contact {
   tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   consentEvents          ContactConsentEvent[]
   campaignRecipients     CampaignRecipient[]
+  conversations          Conversation[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, consentStatus, createdAt])
@@ -291,10 +310,71 @@ model CampaignRecipient {
   @@index([contactId, createdAt])
 }
 
+model InboxAgent {
+  id            String         @id @default(uuid()) @db.Uuid
+  tenantId      String         @db.Uuid
+  externalId    String?
+  name          String
+  email         String?
+  active        Boolean        @default(true)
+  metadata      Json?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+
+  @@unique([tenantId, externalId])
+  @@index([tenantId, active, name])
+}
+
+model Conversation {
+  id              String               @id @default(uuid()) @db.Uuid
+  tenantId        String               @db.Uuid
+  contactId       String               @db.Uuid
+  senderId        String               @db.Uuid
+  assignedAgentId String?              @db.Uuid
+  status          ConversationStatus   @default(OPEN)
+  priority        ConversationPriority @default(NORMAL)
+  unreadCount     Int                  @default(0)
+  lastMessageAt   DateTime
+  lastInboundAt   DateTime?
+  lastOutboundAt  DateTime?
+  resolvedAt      DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact         Contact              @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  sender          WhatsAppPhoneNumber  @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  assignedAgent   InboxAgent?          @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  messages        Message[]
+  notes           ConversationNote[]
+
+  @@unique([tenantId, senderId, contactId])
+  @@index([tenantId, status, lastMessageAt])
+  @@index([tenantId, assignedAgentId, status, lastMessageAt])
+  @@index([tenantId, priority, lastMessageAt])
+  @@index([contactId, lastMessageAt])
+}
+
+model ConversationNote {
+  id                String        @id @default(uuid()) @db.Uuid
+  tenantId          String        @db.Uuid
+  conversationId    String        @db.Uuid
+  createdByApiKeyId String?       @db.Uuid
+  body              String        @db.Text
+  createdAt         DateTime      @default(now())
+  tenant            Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation      Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  createdByApiKey   ApiKey?       @relation("ConversationNoteActor", fields: [createdByApiKeyId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, conversationId, createdAt])
+}
+
 model Message {
   id                   String                 @id @default(uuid()) @db.Uuid
   tenantId             String?                @db.Uuid
   senderId             String?                @db.Uuid
+  conversationId       String?                @db.Uuid
   direction            MessageDirection
   trafficClass         MessageTrafficClass    @default(TRANSACTIONAL)
   type                 MessageType
@@ -320,12 +400,14 @@ model Message {
   failedAt             DateTime?
   tenant               Tenant?                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   sender               WhatsAppPhoneNumber?   @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  conversation         Conversation?          @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   statusEvents         MessageStatusEvent[]
   campaignRecipient    CampaignRecipient?
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, createdAt])
   @@index([tenantId, senderId, createdAt])
+  @@index([tenantId, conversationId, createdAt])
   @@index([tenantId, trafficClass, createdAt])
   @@index([trafficClass, status, processingLeaseUntil, createdAt])
   @@index([status, processingLeaseUntil, createdAt])
