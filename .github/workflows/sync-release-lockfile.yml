@@ -2,7 +2,7 @@ name: Sync release lockfile metadata
 
 on:
   push:
-    branches: [feature/admin-config-audit]
+    branches: [feature/media-messaging-foundation]
 
 permissions:
   contents: write
@@ -29,6 +29,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package-lock.json
           if ! git diff --cached --quiet; then
-            git commit -m "chore: sync 0.15.0 lockfile metadata"
+            git commit -m "chore: sync 0.16.0 lockfile metadata"
             git push
           fi
