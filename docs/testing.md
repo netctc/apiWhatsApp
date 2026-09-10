@@ -24,7 +24,7 @@ The integration suite requires real:
 - Redis;
 - RabbitMQ.
 
-It starts the Nest API and outbound worker in the same test process and starts local controlled HTTP Meta Cloud API mocks on ephemeral loopback ports.
+It starts the Nest API and outbound worker in the same test process and starts local controlled HTTP Meta Cloud API mocks on ephemeral loopback ports. The integration command also builds the production entrypoints first so process-level recovery tests can launch the real `dist/worker.js` executable in an isolated child process.
 
 The integration test applies the real production Prisma migration history to the configured database before the suite is executed in CI.
 
@@ -161,7 +161,7 @@ This proves retryable provider failures remain bounded and cannot loop indefinit
 
 The integration gate deliberately publishes a duplicate outbound queue job while the original logical message is already leased by a worker and blocked inside the Meta test double.
 
-The duplicate must not obtain a second processing lease. It is routed through the bounded retry path while the original delivery remains in `PROCESSING`; after the original provider request succeeds, the delayed duplicate is consumed and acknowledged as already submitted.
+The duplicate must not obtain a second processing lease. Lease collisions are deferred through the shortest configured retry queue without incrementing `x-retry-count`; after the original provider request succeeds, the delayed duplicate is consumed and acknowledged as already submitted.
 
 The suite requires:
 
@@ -170,9 +170,9 @@ The suite requires:
 - one `PROCESSING` lifecycle entry;
 - exactly one Meta provider request;
 - a provider message ID from that single request;
-- the duplicate retry queue to drain without another provider call.
+- the deferred duplicate queue to drain without another provider call.
 
-This exercises at-least-once RabbitMQ delivery behavior and proves an active processing lease prevents concurrent duplicate provider sends.
+This exercises at-least-once RabbitMQ delivery behavior and proves an active processing lease prevents concurrent duplicate provider sends without consuming provider-failure retry budget.
 
 ## Out-of-order delivery webhooks
 
@@ -238,6 +238,27 @@ A fresh API instance is then started against the same database with the normal f
 
 The final state requires one outbox publication attempt, `SUBMITTED`, one provider message ID, and exactly one Meta call. This proves accepted work survives the lifetime of the API process even when the process stops in the post-commit/pre-publish window.
 
+## Worker crash while a processing lease is active
+
+The process-level worker recovery gate builds the production entrypoint, starts `node dist/worker.js` as a child process, and configures a single provider retry. The first Meta request receives HTTP 503 so the message enters that final retry. The second provider request is deliberately held open without a response while PostgreSQL shows the message in `PROCESSING` with an active lease, then the worker process is terminated with `SIGKILL`.
+
+RabbitMQ requeues the unacknowledged final-attempt delivery when the killed process connection disappears. A replacement worker consumes it immediately, but it must not treat the active lease as a provider failure or exhaust the retry policy. Instead the dispatcher returns a lease deferral result and the queue republishes the same logical job through the shortest configured retry queue while preserving the existing `x-retry-count`.
+
+After the processing lease expires, the replacement worker can claim the message and complete the provider request. The suite requires:
+
+- the crashed worker to have made two processing claims before termination;
+- the second claim to be active when `SIGKILL` is delivered;
+- no successful provider response before the crash;
+- recovery from the same RabbitMQ job even though it is already at the configured final retry count;
+- a third processing claim after lease expiry;
+- final `SUBMITTED` state with the processing lease cleared;
+- three `PROCESSING` lifecycle entries and `attemptCount=3`;
+- exactly one successful Meta response after recovery.
+
+This closes a failure mode where a redelivered final-attempt job could previously be dead-lettered while the database lease was still active, leaving the message permanently stranded in `PROCESSING` after the lease expired.
+
+The test intentionally kills the worker while the second HTTP request is pending and before the Meta test double accepts it. If an external provider has already accepted a request and the worker dies before persisting the provider message ID, exactly-once delivery cannot be guaranteed by a local database lease alone; that ambiguous network boundary still requires provider-side idempotency or reconciliation where available.
+
 ## What the CI smoke test is not
 
 The 50-message burst is a regression/smoke gate, **not a production capacity certification**.
@@ -279,9 +300,8 @@ Measure at minimum:
 
 ## Remaining failure-injection scenarios
 
-The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, Redis rate-limiter recovery, and recovery across the API post-commit/pre-publish restart window. Further failure-injection suites should be added incrementally for:
+The gate now proves the normal durable path, Meta transient/permanent handling, bounded retry exhaustion, duplicate RabbitMQ delivery protection, monotonic delayed/out-of-order delivery status handling, recovery from RabbitMQ unavailability during outbox publication, Redis rate-limiter recovery, recovery across the API post-commit/pre-publish restart window, and replacement-worker recovery after abrupt termination during an active final-attempt processing lease. Further failure-injection coverage should be added for:
 
-- worker termination while a processing lease is active;
 - webhook burst while campaigns are running.
 
 ## Local execution example
