@@ -64,7 +64,7 @@ export function normalizeMediaPayload(type: string, input: unknown): NormalizedM
       ? readOptionalString(payload.filename, `${type} payload 'filename'`, 240)
       : undefined;
 
-  if (filename && /[\u0000-\u001f\u007f]/u.test(filename)) {
+  if (filename && containsControlCharacter(filename)) {
     throw new MediaPayloadError("DOCUMENT payload 'filename' cannot contain control characters");
   }
 
@@ -92,6 +92,16 @@ function readOptionalString(value: unknown, label: string, maxLength: number): s
     throw new MediaPayloadError(`${label} cannot exceed ${maxLength} characters`);
   }
   return normalized;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint <= 31 || codePoint === 127) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function validateHttpsLink(type: MediaMessageType, value: string): void {
