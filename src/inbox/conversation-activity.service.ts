@@ -88,31 +88,48 @@ export class ConversationActivityService {
       return undefined;
     }
 
-    const conversation = await transaction.conversation.upsert({
-      where: {
-        tenantId_senderId_contactId: {
-          tenantId: activity.tenantId,
-          senderId: activity.senderId,
-          contactId: contact.id,
-        },
-      },
-      create: {
-        tenantId: activity.tenantId,
-        senderId: activity.senderId,
-        contactId: contact.id,
-        status: "OPEN",
-        lastMessageAt: activity.occurredAt,
-        lastOutboundAt: activity.occurredAt,
-      },
-      update: {
-        status: "OPEN",
-        resolvedAt: null,
-        lastMessageAt: activity.occurredAt,
-        lastOutboundAt: activity.occurredAt,
-      },
-      select: { id: true },
-    });
+    const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      INSERT INTO "Conversation" (
+        "id",
+        "tenantId",
+        "contactId",
+        "senderId",
+        "status",
+        "priority",
+        "unreadCount",
+        "lastMessageAt",
+        "lastOutboundAt",
+        "createdAt",
+        "updatedAt"
+      ) VALUES (
+        ${randomUUID()}::uuid,
+        ${activity.tenantId}::uuid,
+        ${contact.id}::uuid,
+        ${activity.senderId}::uuid,
+        'OPEN'::"ConversationStatus",
+        'NORMAL'::"ConversationPriority",
+        0,
+        ${activity.occurredAt},
+        ${activity.occurredAt},
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP
+      )
+      ON CONFLICT ("tenantId", "senderId", "contactId") DO UPDATE SET
+        "status" = 'OPEN'::"ConversationStatus",
+        "resolvedAt" = NULL,
+        "lastMessageAt" = GREATEST("Conversation"."lastMessageAt", EXCLUDED."lastMessageAt"),
+        "lastOutboundAt" = GREATEST(
+          COALESCE("Conversation"."lastOutboundAt", EXCLUDED."lastOutboundAt"),
+          EXCLUDED."lastOutboundAt"
+        ),
+        "updatedAt" = CURRENT_TIMESTAMP
+      RETURNING "id"
+    `);
 
-    return conversation.id;
+    const conversationId = rows[0]?.id;
+    if (!conversationId) {
+      throw new Error("Unable to create or update outbound conversation");
+    }
+    return conversationId;
   }
 }
