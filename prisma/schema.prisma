@@ -105,6 +105,7 @@ model Tenant {
   segments          ContactSegment[]
   auditLogs         AuditLog[]
   inboxAgents       InboxAgent[]
+  inboxTeams        InboxTeam[]
   conversations     Conversation[]
   conversationNotes ConversationNote[]
   mediaAssets       MediaAsset[]
@@ -327,7 +328,34 @@ model InboxAgent {
   conversations Conversation[]
 
   @@unique([tenantId, externalId])
+  @@unique([tenantId, id])
   @@index([tenantId, active, name])
+}
+
+model InboxTeam {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  name        String   @db.VarChar(120)
+  description String?  @db.VarChar(500)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id])
+  @@index([tenantId, active, name])
+}
+
+model InboxTeamMember {
+  tenantId  String   @db.Uuid
+  teamId    String   @db.Uuid
+  agentId   String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@id([teamId, agentId])
+  @@index([tenantId, agentId])
+  @@index([tenantId, teamId, createdAt])
 }
 
 model Conversation {
