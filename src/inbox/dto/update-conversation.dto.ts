@@ -20,4 +20,12 @@ export class UpdateConversationDto {
   @IsOptional()
   @IsUUID()
   assignedAgentId?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: "Tenant inbox-team UUID. Send null to remove the explicit team assignment.",
+  })
+  @IsOptional()
+  @IsUUID()
+  assignedTeamId?: string | null;
 }
