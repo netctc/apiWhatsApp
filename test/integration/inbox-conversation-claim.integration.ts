@@ -6,6 +6,7 @@ import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
 import type { InboxRealtimeEvent } from "../../src/inbox-events/inbox-event.types.js";
 import { InboxRealtimeService } from "../../src/inbox-events/inbox-realtime.service.js";
+import { InboxService } from "../../src/inbox/inbox.service.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
 
 const HASH_SECRET = "inbox-claim-integration-secret-0123456789abcdef";
@@ -16,6 +17,7 @@ const conversationRoute = (id: string) => `/api/v1/inbox/conversations/${id}`;
 describe("inbox conversation claim and release integration", () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  let inbox: InboxService;
   let realtime: InboxRealtimeService;
   const tenantIds: string[] = [];
   let tenantA: string;
@@ -89,6 +91,7 @@ describe("inbox conversation claim and release integration", () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.listen(0, "127.0.0.1");
     prisma = app.get(PrismaService);
+    inbox = app.get(InboxService);
     realtime = app.get(InboxRealtimeService);
 
     for (let index = 0; index < 2; index += 1) {
@@ -212,6 +215,19 @@ describe("inbox conversation claim and release integration", () => {
     expect(persisted.assignedAgentId).toBe(agentA);
   });
 
+  it("allows a tenant agent that was deactivated after assignment to release its conversation", async () => {
+    await prisma.conversation.update({
+      where: { id: conversationA },
+      data: { assignedAgentId: inactiveAgent },
+    });
+
+    const released = await post(releaseRoute(conversationA), writerKey, inactiveAgent).expect(200);
+    expect(released.body.assignedAgentId).toBeNull();
+
+    const persisted = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationA } });
+    expect(persisted.assignedAgentId).toBeNull();
+  });
+
   it("keeps cross-tenant conversations indistinguishable from missing conversations", async () => {
     await post(claimRoute(foreignConversation), writerKey, agentA).expect(404);
     await post(releaseRoute(foreignConversation), writerKey, agentA).expect(404);
@@ -224,6 +240,24 @@ describe("inbox conversation claim and release integration", () => {
       .set("X-API-Key", writerKey)
       .send({ agentId: "not-a-uuid" })
       .expect(400);
+  });
+
+  it("rolls back a real PostgreSQL assignment when its audit insert fails", async () => {
+    await expect(inbox.claimConversation(
+      {
+        tenantId: tenantA,
+        apiKeyId: randomUUID(),
+        scopes: [ApiScope.INBOX_WRITE],
+      },
+      conversationA,
+      agentA,
+    )).rejects.toBeDefined();
+
+    const persisted = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationA } });
+    expect(persisted.assignedAgentId).toBeNull();
+    expect(await prisma.auditLog.count({
+      where: { tenantId: tenantA, entityId: conversationA, action: "inbox.conversation.claimed" },
+    })).toBe(0);
   });
 
   it("preserves explicit administrative reassignment after a cooperative claim", async () => {
