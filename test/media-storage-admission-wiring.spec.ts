@@ -5,6 +5,7 @@ import { jest } from "@jest/globals";
 import { ServiceUnavailableException } from "@nestjs/common";
 import { MediaBinaryStorageError } from "../src/media/media-binary-storage.service.js";
 import { MediaService } from "../src/media/media.service.js";
+import { minimalJpeg } from "./helpers/media-fixtures.js";
 
 const TENANT_ID = "123e4567-e89b-42d3-a456-426614174000";
 const SENDER_ID = "123e4567-e89b-42d3-a456-426614174001";
@@ -13,7 +14,7 @@ describe("MediaService storage admission wiring", () => {
   it("runs projected-capacity admission after target validation and before every downstream boundary", async () => {
     const directory = await mkdtemp(join(tmpdir(), "api-whatsapp-media-admission-wiring-"));
     const filePath = join(directory, "upload");
-    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x41, 0x42, 0xff, 0xd9]);
+    const jpeg = minimalJpeg();
     await writeFile(filePath, jpeg);
 
     const resolveForTenant = jest.fn();
