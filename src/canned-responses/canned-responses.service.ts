@@ -3,6 +3,7 @@ import { auditLogData, mutationActor } from "../audit/audit-write.util.js";
 import type { AuditRequestContext } from "../audit/audit.types.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { Prisma } from "../generated/prisma/client.js";
+import { InboxRealtimeService } from "../inbox-events/inbox-realtime.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import { CannedResponseInputError, normalizeShortcut, prepareCannedResponseCreate, prepareCannedResponsePatch } from "./canned-response.policy.js";
 import type { CreateCannedResponseDto, ListCannedResponsesQueryDto, UpdateCannedResponseDto } from "./dto/canned-response-input.dto.js";
@@ -15,17 +16,26 @@ const select = {
 
 @Injectable()
 export class CannedResponsesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtime: InboxRealtimeService,
+  ) {}
 
   async create(principal: ApiPrincipal, dto: CreateCannedResponseDto, context?: AuditRequestContext): Promise<CannedResponseDto> {
     try {
       const content = prepareCannedResponseCreate(dto);
-      return await this.prisma.$transaction(async (tx) => {
-        const item = await tx.inboxCannedResponse.create({ data: { tenantId: principal.tenantId, ...content }, select });
-        const audit = auditLogData(mutationActor(principal), context, "inbox.canned_response.created", "InboxCannedResponse", item.id, { revision: item.revision, active: item.active });
+      const item = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.inboxCannedResponse.create({ data: { tenantId: principal.tenantId, ...content }, select });
+        const audit = auditLogData(mutationActor(principal), context, "inbox.canned_response.created", "InboxCannedResponse", created.id, { revision: created.revision, active: created.active });
         if (audit) await tx.auditLog.create({ data: audit });
-        return item;
+        return created;
       });
+      await this.realtime.publish(principal.tenantId, "canned_response.created", {
+        cannedResponseId: item.id,
+        revision: item.revision,
+        active: item.active,
+      });
+      return item;
     } catch (error) {
       this.rethrow(error);
     }
@@ -47,9 +57,6 @@ export class CannedResponsesService {
         where: { id: query.cursor, tenantId }, select: { id: true, createdAt: true },
       });
       if (!anchor) throw new BadRequestException("Canned response cursor is invalid for this tenant");
-      // The anchor may no longer match active/shortcut. Exclude its position, not
-      // the first matching row: cursor + skip: 1 would silently drop that row.
-      // This table uses TIMESTAMP(3), so its timestamp round-trips exactly via Date.
       position = {
         OR: [
           { createdAt: { lt: anchor.createdAt } },
@@ -82,8 +89,7 @@ export class CannedResponsesService {
   async update(principal: ApiPrincipal, id: string, dto: UpdateCannedResponseDto, context?: AuditRequestContext): Promise<CannedResponseDto> {
     try {
       const { expectedRevision, changes } = prepareCannedResponsePatch(dto);
-      return await this.prisma.$transaction(async (tx) => {
-        // Compare and increment in one SQL UPDATE; no read-then-write race or timestamp token.
+      const item = await this.prisma.$transaction(async (tx) => {
         const result = await tx.inboxCannedResponse.updateMany({
           where: { id, tenantId: principal.tenantId, revision: expectedRevision },
           data: { ...changes, revision: { increment: 1 } },
@@ -93,13 +99,19 @@ export class CannedResponsesService {
           if (!exists) throw new NotFoundException("Canned response not found");
           throw new ConflictException("Canned response revision has changed; reload before updating");
         }
-        const item = await tx.inboxCannedResponse.findFirstOrThrow({ where: { id, tenantId: principal.tenantId }, select });
+        const updated = await tx.inboxCannedResponse.findFirstOrThrow({ where: { id, tenantId: principal.tenantId }, select });
         const audit = auditLogData(mutationActor(principal), context, "inbox.canned_response.updated", "InboxCannedResponse", id, {
-          changedFields: Object.keys(changes).sort(), revision: item.revision, active: item.active,
+          changedFields: Object.keys(changes).sort(), revision: updated.revision, active: updated.active,
         });
         if (audit) await tx.auditLog.create({ data: audit });
-        return item;
+        return updated;
       });
+      await this.realtime.publish(principal.tenantId, "canned_response.updated", {
+        cannedResponseId: item.id,
+        revision: item.revision,
+        active: item.active,
+      });
+      return item;
     } catch (error) {
       this.rethrow(error);
     }

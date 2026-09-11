@@ -14,51 +14,78 @@ function setup() {
     findMany: jest.fn<(arg: unknown) => Promise<unknown>>().mockResolvedValue([row]),
   };
   const audit = jest.fn<(arg: unknown) => Promise<unknown>>().mockResolvedValue({});
+  const publish = jest.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
   const tx = { inboxCannedResponse: model, auditLog: { create: audit } };
   const transaction = jest.fn<(callback: (client: unknown) => Promise<unknown>) => Promise<unknown>>().mockImplementation((callback) => callback(tx));
-  return { model, audit, transaction, service: new CannedResponsesService({ ...tx, $transaction: transaction } as never) };
+  return {
+    model,
+    audit,
+    publish,
+    transaction,
+    service: new CannedResponsesService(
+      { ...tx, $transaction: transaction } as never,
+      { publish } as never,
+    ),
+  };
 }
 
 describe("CannedResponsesService", () => {
-  it("creates under the principal and audits without copying content", async () => {
-    const { service, model, audit } = setup();
+  it("creates under the principal, audits without copying content, and publishes structural realtime state", async () => {
+    const { service, model, audit, publish } = setup();
     await service.create(principal, { shortcut: " HELLO ", title: row.title, body: row.body });
     expect(model.create).toHaveBeenCalledWith(expect.objectContaining({ data: { tenantId: principal.tenantId, shortcut: "hello", title: row.title, body: row.body } }));
     expect(audit).toHaveBeenCalledWith({ data: expect.objectContaining({ tenantId: principal.tenantId, actorApiKeyId: principal.apiKeyId, action: "inbox.canned_response.created", metadata: { revision: 1, active: true } }) });
+    expect(publish).toHaveBeenCalledWith(principal.tenantId, "canned_response.created", {
+      cannedResponseId: row.id,
+      revision: 1,
+      active: true,
+    });
     expect(JSON.stringify(audit.mock.calls)).not.toContain(row.body);
     expect(JSON.stringify(audit.mock.calls)).not.toContain(row.title);
+    expect(JSON.stringify(publish.mock.calls)).not.toContain(row.body);
+    expect(JSON.stringify(publish.mock.calls)).not.toContain(row.title);
   });
   it("rejects invalid create before opening a transaction", async () => {
-    const { service, transaction } = setup();
+    const { service, transaction, publish } = setup();
     await expect(service.create(principal, { shortcut: "bad shortcut", title: "T", body: "B" })).rejects.toBeInstanceOf(BadRequestException);
     expect(transaction).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
   });
-  it("compares tenant and revision atomically and audits structural changes", async () => {
-    const { service, model, audit } = setup();
+  it("compares tenant and revision atomically, audits structural changes, and publishes after commit", async () => {
+    const { service, model, audit, publish } = setup();
     await service.update(principal, row.id, { expectedRevision: 1, title: "Updated" });
     expect(model.updateMany).toHaveBeenCalledWith({ where: { id: row.id, tenantId: principal.tenantId, revision: 1 }, data: { title: "Updated", revision: { increment: 1 } } });
     expect(audit).toHaveBeenCalledWith({ data: expect.objectContaining({ metadata: { changedFields: ["title"], revision: 2, active: true } }) });
+    expect(publish).toHaveBeenCalledWith(principal.tenantId, "canned_response.updated", {
+      cannedResponseId: row.id,
+      revision: 2,
+      active: true,
+    });
     expect(JSON.stringify(audit.mock.calls)).not.toContain("Updated");
+    expect(JSON.stringify(publish.mock.calls)).not.toContain("Updated");
   });
-  it("returns 409 for a stale owned revision without an audit write", async () => {
-    const { service, model, audit } = setup(); model.updateMany.mockResolvedValue({ count: 0 });
+  it("returns 409 for a stale owned revision without an audit or realtime write", async () => {
+    const { service, model, audit, publish } = setup(); model.updateMany.mockResolvedValue({ count: 0 });
     await expect(service.update(principal, row.id, { expectedRevision: 1, active: false })).rejects.toBeInstanceOf(ConflictException);
     expect(model.findFirst).toHaveBeenCalledWith({ where: { id: row.id, tenantId: principal.tenantId }, select: { id: true } });
     expect(audit).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
   });
   it("returns the same 404 for missing or unowned update targets", async () => {
-    const { service, model, audit } = setup(); model.updateMany.mockResolvedValue({ count: 0 }); model.findFirst.mockResolvedValue(null);
+    const { service, model, audit, publish } = setup(); model.updateMany.mockResolvedValue({ count: 0 }); model.findFirst.mockResolvedValue(null);
     await expect(service.update(principal, row.id, { expectedRevision: 1, active: false })).rejects.toBeInstanceOf(NotFoundException);
     expect(audit).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
   });
   it("maps duplicate shortcuts to a safe conflict", async () => {
     const { service, model } = setup();
     model.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("private db detail", { code: "P2002", clientVersion: "test" }));
     await expect(service.create(principal, { shortcut: row.shortcut, title: row.title, body: row.body })).rejects.toThrow("Canned response shortcut already exists in this tenant");
   });
-  it("propagates audit failure out of the transaction", async () => {
-    const { service, audit } = setup(); const failure = new Error("audit unavailable"); audit.mockRejectedValue(failure);
+  it("propagates audit failure out of the transaction without publishing", async () => {
+    const { service, audit, publish } = setup(); const failure = new Error("audit unavailable"); audit.mockRejectedValue(failure);
     await expect(service.update(principal, row.id, { expectedRevision: 1, active: false })).rejects.toBe(failure);
+    expect(publish).not.toHaveBeenCalled();
   });
   it("bounds and scopes list queries with a minimal projection", async () => {
     const { service, model } = setup();
