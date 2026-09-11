@@ -73,12 +73,11 @@ concurrency:
 
 jobs:
   capacity:
-    if: ${{ inputs.confirm_isolated_test_env }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     environment: ${{ inputs.environment_name }}
     env:
-      EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV: "true"
+      EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV: ${{ inputs.confirm_isolated_test_env }}
       EXTERNAL_CAPACITY_BASE_URL: ${{ secrets.EXTERNAL_CAPACITY_BASE_URL }}
       EXTERNAL_CAPACITY_API_KEY: ${{ secrets.EXTERNAL_CAPACITY_API_KEY }}
       EXTERNAL_CAPACITY_RECIPIENTS: ${{ secrets.EXTERNAL_CAPACITY_RECIPIENTS }}
@@ -106,6 +105,10 @@ jobs:
       - name: Validate external capacity target configuration
         shell: bash
         run: |
+          test "$EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV" = "true" || {
+            echo "confirm_isolated_test_env must be explicitly enabled" >&2
+            exit 1
+          }
           case "$EXTERNAL_CAPACITY_PROFILE_NAME" in
             *[!A-Za-z0-9._-]*|'') echo "Invalid profile_name" >&2; exit 1 ;;
           esac
