@@ -108,6 +108,7 @@ export async function matchesPngStructure(filePath: string): Promise<boolean> {
     let seenIdat = false;
     let idatClosed = false;
     let colorType: number | null = null;
+    let bitDepth: number | null = null;
 
     while (offset < fileStat.size && chunkCount < PNG_MAX_CHUNKS) {
       const header = await readExactly(handle, 8, offset);
@@ -144,6 +145,7 @@ export async function matchesPngStructure(filePath: string): Promise<boolean> {
         if (!ihdr || !validatePngIhdr(ihdr)) {
           return false;
         }
+        bitDepth = ihdr[8] ?? null;
         colorType = ihdr[9] ?? null;
         seenIhdr = true;
       } else if (!seenIhdr) {
@@ -151,6 +153,7 @@ export async function matchesPngStructure(filePath: string): Promise<boolean> {
       }
 
       if (type === "PLTE") {
+        const paletteEntries = dataLength / 3;
         if (
           seenPlte ||
           seenIdat ||
@@ -158,7 +161,9 @@ export async function matchesPngStructure(filePath: string): Promise<boolean> {
           dataLength > 768 ||
           dataLength % 3 !== 0 ||
           colorType === PNG_COLOR_GRAYSCALE ||
-          colorType === PNG_COLOR_GRAYSCALE_ALPHA
+          colorType === PNG_COLOR_GRAYSCALE_ALPHA ||
+          (colorType === PNG_COLOR_INDEXED &&
+            (bitDepth === null || paletteEntries > 2 ** bitDepth))
         ) {
           return false;
         }
@@ -312,7 +317,9 @@ function isPngChunkType(type: Buffer): boolean {
       return false;
     }
   }
-  return true;
+
+  const reservedByte = type[2] ?? 0;
+  return reservedByte >= 0x41 && reservedByte <= 0x5a;
 }
 
 function isUnknownCriticalPngChunk(typeBytes: Buffer, type: string): boolean {
