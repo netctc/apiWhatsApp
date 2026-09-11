@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { InboxEventsModule } from "../inbox-events/inbox-events.module.js";
 import { InboxModule } from "../inbox/inbox.module.js";
 import { PhoneNumbersModule } from "../phone-numbers/phone-numbers.module.js";
 import { TemplatesModule } from "../templates/templates.module.js";
@@ -9,7 +10,7 @@ import { WebhookStatusService } from "./webhook-status.service.js";
 import { WebhooksController } from "./webhooks.controller.js";
 
 @Module({
-  imports: [InboxModule, PhoneNumbersModule, TemplatesModule],
+  imports: [InboxModule, InboxEventsModule, PhoneNumbersModule, TemplatesModule],
   controllers: [WebhooksController],
   providers: [
     InboundMessageService,
