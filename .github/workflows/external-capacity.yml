@@ -1,0 +1,200 @@
+name: External Capacity Profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: GitHub Environment containing isolated capacity target secrets
+        required: true
+        default: capacity-test
+        type: string
+      confirm_isolated_test_env:
+        description: Confirm the target is an isolated non-production tenant/environment
+        required: true
+        default: false
+        type: boolean
+      profile_name:
+        description: Bounded label recorded in the capacity report
+        required: true
+        default: profile-c
+        type: string
+      messages:
+        description: Total outbound message acceptance attempts
+        required: true
+        default: "100000"
+        type: string
+      concurrency:
+        description: Maximum concurrent HTTP acceptance requests
+        required: true
+        default: "500"
+        type: string
+      target_rps:
+        description: Optional request-start rate; 0 disables pacing
+        required: true
+        default: "0"
+        type: string
+      accept_p95_ms:
+        description: Maximum accepted-request p95 latency in milliseconds
+        required: true
+        default: "3000"
+        type: string
+      accept_p99_ms:
+        description: Maximum accepted-request p99 latency in milliseconds
+        required: true
+        default: "5000"
+        type: string
+      max_error_rate:
+        description: Maximum acceptance error fraction from 0 through 1
+        required: true
+        default: "0"
+        type: string
+      drain_max_ms:
+        description: Maximum post-acceptance drain time in milliseconds
+        required: true
+        default: "1800000"
+        type: string
+      request_timeout_ms:
+        description: Timeout for each API or operations request
+        required: true
+        default: "10000"
+        type: string
+      snapshot_interval_ms:
+        description: Operations snapshot sampling interval
+        required: true
+        default: "5000"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: external-capacity-${{ inputs.environment_name }}
+  cancel-in-progress: false
+
+jobs:
+  capacity:
+    if: ${{ inputs.confirm_isolated_test_env }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    environment: ${{ inputs.environment_name }}
+    env:
+      EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV: "true"
+      EXTERNAL_CAPACITY_BASE_URL: ${{ secrets.EXTERNAL_CAPACITY_BASE_URL }}
+      EXTERNAL_CAPACITY_API_KEY: ${{ secrets.EXTERNAL_CAPACITY_API_KEY }}
+      EXTERNAL_CAPACITY_RECIPIENTS: ${{ secrets.EXTERNAL_CAPACITY_RECIPIENTS }}
+      EXTERNAL_CAPACITY_SENDER_ID: ${{ secrets.EXTERNAL_CAPACITY_SENDER_ID }}
+      EXTERNAL_CAPACITY_PROFILE_NAME: ${{ inputs.profile_name }}
+      EXTERNAL_CAPACITY_MESSAGES: ${{ inputs.messages }}
+      EXTERNAL_CAPACITY_CONCURRENCY: ${{ inputs.concurrency }}
+      EXTERNAL_CAPACITY_TARGET_RPS: ${{ inputs.target_rps }}
+      EXTERNAL_CAPACITY_ACCEPT_P95_MS: ${{ inputs.accept_p95_ms }}
+      EXTERNAL_CAPACITY_ACCEPT_P99_MS: ${{ inputs.accept_p99_ms }}
+      EXTERNAL_CAPACITY_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
+      EXTERNAL_CAPACITY_DRAIN_MAX_MS: ${{ inputs.drain_max_ms }}
+      EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS: ${{ inputs.request_timeout_ms }}
+      EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS: ${{ inputs.snapshot_interval_ms }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate external capacity target configuration
+        shell: bash
+        run: |
+          case "$EXTERNAL_CAPACITY_PROFILE_NAME" in
+            *[!A-Za-z0-9._-]*|'') echo "Invalid profile_name" >&2; exit 1 ;;
+          esac
+          case "$EXTERNAL_CAPACITY_MESSAGES:$EXTERNAL_CAPACITY_CONCURRENCY:$EXTERNAL_CAPACITY_TARGET_RPS:$EXTERNAL_CAPACITY_ACCEPT_P95_MS:$EXTERNAL_CAPACITY_ACCEPT_P99_MS:$EXTERNAL_CAPACITY_MAX_ERROR_RATE:$EXTERNAL_CAPACITY_DRAIN_MAX_MS:$EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS:$EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS" in
+            *[!0-9.:]*|'') echo "Capacity inputs must be numeric" >&2; exit 1 ;;
+          esac
+          test -n "$EXTERNAL_CAPACITY_BASE_URL" || { echo "EXTERNAL_CAPACITY_BASE_URL secret is required" >&2; exit 1; }
+          test -n "$EXTERNAL_CAPACITY_API_KEY" || { echo "EXTERNAL_CAPACITY_API_KEY secret is required" >&2; exit 1; }
+          test -n "$EXTERNAL_CAPACITY_RECIPIENTS" || { echo "EXTERNAL_CAPACITY_RECIPIENTS secret is required" >&2; exit 1; }
+
+      - name: Run external capacity profile
+        id: capacity
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          mkdir -p external-capacity-artifacts
+          npm run test:capacity:external 2>&1 | tee external-capacity-artifacts/external-capacity.log
+          runner_status=${PIPESTATUS[0]}
+          grep '^\[external-capacity\] {' external-capacity-artifacts/external-capacity.log \
+            | tail -n 1 \
+            | sed 's/^\[external-capacity\] //' \
+            > external-capacity-artifacts/external-capacity.json
+          if [ -s external-capacity-artifacts/external-capacity.json ]; then
+            node -e 'JSON.parse(require("node:fs").readFileSync("external-capacity-artifacts/external-capacity.json", "utf8"))'
+          fi
+          echo "exit_code=$runner_status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Record non-secret execution metadata
+        if: always()
+        shell: bash
+        env:
+          CAPACITY_ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          CAPACITY_PROFILE_NAME: ${{ inputs.profile_name }}
+          CAPACITY_MESSAGES: ${{ inputs.messages }}
+          CAPACITY_CONCURRENCY: ${{ inputs.concurrency }}
+          CAPACITY_TARGET_RPS: ${{ inputs.target_rps }}
+          CAPACITY_ACCEPT_P95_MS: ${{ inputs.accept_p95_ms }}
+          CAPACITY_ACCEPT_P99_MS: ${{ inputs.accept_p99_ms }}
+          CAPACITY_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
+          CAPACITY_DRAIN_MAX_MS: ${{ inputs.drain_max_ms }}
+        run: |
+          mkdir -p external-capacity-artifacts
+          node <<'NODE'
+          const fs = require("node:fs");
+          const os = require("node:os");
+          const metadata = {
+            profile: process.env.CAPACITY_PROFILE_NAME,
+            environmentClass: "external-deployed-isolated-test",
+            environmentName: process.env.CAPACITY_ENVIRONMENT_NAME,
+            commitSha: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            nodeVersion: process.version,
+            cpuModel: os.cpus()[0]?.model ?? "unknown",
+            cpuCount: os.cpus().length,
+            totalMemoryBytes: os.totalmem(),
+            workload: {
+              messages: Number(process.env.CAPACITY_MESSAGES),
+              concurrency: Number(process.env.CAPACITY_CONCURRENCY),
+              targetRps: Number(process.env.CAPACITY_TARGET_RPS),
+            },
+            gates: {
+              acceptP95Ms: Number(process.env.CAPACITY_ACCEPT_P95_MS),
+              acceptP99Ms: Number(process.env.CAPACITY_ACCEPT_P99_MS),
+              maxErrorRate: Number(process.env.CAPACITY_MAX_ERROR_RATE),
+              drainMaxMs: Number(process.env.CAPACITY_DRAIN_MAX_MS),
+            },
+            note: "Target endpoint, API key, recipients, sender id and payload content are intentionally excluded",
+          };
+          fs.writeFileSync(
+            "external-capacity-artifacts/external-capacity-environment.json",
+            `${JSON.stringify(metadata, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Upload external capacity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-capacity-${{ github.run_id }}
+          path: external-capacity-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce capacity result
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.capacity.outputs.exit_code }}" = "0"
