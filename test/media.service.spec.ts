@@ -50,7 +50,7 @@ describe("MediaService", () => {
     providerMediaId: null,
     category: "IMAGE",
     mimeType: "image/jpeg",
-    size: 4,
+    size: minimalJpeg().length,
     scanMode: "DISABLED",
     scanStatus: "NOT_SCANNED",
     storageMode: "DISABLED",
