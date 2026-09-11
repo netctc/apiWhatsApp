@@ -59,7 +59,7 @@ describe("inbox conversation claim and release integration", () => {
     });
   }
 
-  async function post(path: string, key: string, agentId: string) {
+  function post(path: string, key: string, agentId: string) {
     return request(app.getHttpServer())
       .post(path)
       .set("X-API-Key", key)
