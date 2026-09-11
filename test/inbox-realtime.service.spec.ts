@@ -1,4 +1,5 @@
 import { ConfigService } from "@nestjs/config";
+import type { InboxEventData } from "../src/inbox-events/inbox-event.types.js";
 import { InboxRealtimeService } from "../src/inbox-events/inbox-realtime.service.js";
 
 function serviceWith(values: Record<string, string>): InboxRealtimeService {
@@ -36,6 +37,18 @@ describe("InboxRealtimeService", () => {
       INBOX_SSE_HEARTBEAT_MS: "20000",
     });
     expect(service.heartbeatMs()).toBe(20_000);
+  });
+
+  it("preserves valid nullable team assignment while sanitizing realtime data", () => {
+    const service = serviceWith({ REDIS_URL: "redis://127.0.0.1:6379" });
+    const sanitizer = service as unknown as { safeData(value: unknown): InboxEventData };
+    const teamId = "11111111-1111-4111-8111-111111111111";
+
+    expect(sanitizer.safeData({ assignedTeamId: teamId, unsafe: "drop-me" })).toEqual({
+      assignedTeamId: teamId,
+    });
+    expect(sanitizer.safeData({ assignedTeamId: null })).toEqual({ assignedTeamId: null });
+    expect(sanitizer.safeData({ assignedTeamId: "not-a-uuid" })).toEqual({});
   });
 
   it("requires the existing Redis dependency configuration", () => {
