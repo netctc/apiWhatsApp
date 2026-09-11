@@ -1,0 +1,260 @@
+name: Hosted Profile C Baseline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test/capacity-profile-c-hosted
+    paths:
+      - .github/capacity-profile-c.trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hosted-profile-c-baseline
+  cancel-in-progress: false
+
+jobs:
+  capacity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      NODE_ENV: test
+      PORT: "3000"
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/api_whatsapp_capacity_c?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672
+      API_KEY_HASH_SECRET: hosted-profile-c-api-key-hash-secret-0123456789abcdef
+      META_GRAPH_API_VERSION: v99.0
+      META_GRAPH_API_BASE_URL: http://127.0.0.1:4100
+      META_HTTP_TIMEOUT_MS: "3000"
+      META_APP_SECRET: hosted-profile-c-meta-secret
+      META_WEBHOOK_VERIFY_TOKEN: hosted-profile-c-verify-token
+      TEST_META_ACCESS_TOKEN: hosted-profile-c-access-token
+      CAPACITY_META_MOCK_PORT: "4100"
+      MEDIA_MALWARE_SCAN_MODE: disabled
+      MEDIA_BINARY_STORAGE_MODE: disabled
+      MEDIA_ASSET_CLEANUP_INTERVAL_MS: "3600000"
+      OUTBOUND_QUEUE_NAME: whatsapp.capacity.hosted.profile-c
+      OUTBOX_POLL_INTERVAL_MS: "25"
+      OUTBOX_BATCH_SIZE: "500"
+      OUTBOUND_WORKER_PREFETCH: "200"
+      OUTBOUND_WORKER_PREFETCH_TRANSACTIONAL: "200"
+      OUTBOUND_MESSAGE_LEASE_MS: "10000"
+      DEFAULT_OUTBOUND_RATE_LIMIT_PER_SECOND: "1000"
+      WEBHOOK_PROCESSOR_INTERVAL_MS: "1000"
+      CAMPAIGN_PROCESSOR_INTERVAL_MS: "1000"
+      EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV: "true"
+      EXTERNAL_CAPACITY_BASE_URL: http://127.0.0.1:3000
+      EXTERNAL_CAPACITY_PROFILE_NAME: profile-c-hosted
+      EXTERNAL_CAPACITY_MESSAGES: "100000"
+      EXTERNAL_CAPACITY_CONCURRENCY: "500"
+      EXTERNAL_CAPACITY_TARGET_RPS: "0"
+      EXTERNAL_CAPACITY_ACCEPT_P95_MS: "3000"
+      EXTERNAL_CAPACITY_ACCEPT_P99_MS: "5000"
+      EXTERNAL_CAPACITY_MAX_ERROR_RATE: "0"
+      EXTERNAL_CAPACITY_DRAIN_MAX_MS: "1800000"
+      EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS: "10000"
+      EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS: "5000"
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: api_whatsapp_capacity_c
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d api_whatsapp_capacity_c"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run prisma:generate
+          npm run prisma:deploy
+          npm run build
+
+      - name: Bootstrap isolated capacity fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_json="$(node scripts/bootstrap-hosted-capacity.mjs)"
+          api_key="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).apiKey)' "$fixture_json")"
+          recipient="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).recipient)' "$fixture_json")"
+          sender_id="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).senderId)' "$fixture_json")"
+          tenant_id="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).tenantId)' "$fixture_json")"
+
+          echo "::add-mask::$api_key"
+          echo "::add-mask::$recipient"
+          echo "::add-mask::$sender_id"
+          echo "::add-mask::$tenant_id"
+          {
+            echo "EXTERNAL_CAPACITY_API_KEY=$api_key"
+            echo "EXTERNAL_CAPACITY_RECIPIENTS=$recipient"
+            echo "EXTERNAL_CAPACITY_SENDER_ID=$sender_id"
+          } >> "$GITHUB_ENV"
+
+      - name: Start isolated API, worker, and Meta seam
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p capacity-artifacts
+          node scripts/capacity-meta-mock.mjs > /tmp/capacity-meta.log 2>&1 &
+          meta_pid=$!
+          node dist/main.js > /tmp/capacity-api.log 2>&1 &
+          api_pid=$!
+          node dist/worker.js > /tmp/capacity-worker.log 2>&1 &
+          worker_pid=$!
+          {
+            echo "CAPACITY_META_PID=$meta_pid"
+            echo "CAPACITY_API_PID=$api_pid"
+            echo "CAPACITY_WORKER_PID=$worker_pid"
+          } >> "$GITHUB_ENV"
+
+          for attempt in $(seq 1 90); do
+            if curl --silent --fail http://127.0.0.1:4100/health >/dev/null \
+              && curl --silent --fail http://127.0.0.1:3000/api/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Hosted capacity stack did not become ready" >&2
+          exit 1
+
+      - name: Run Profile C
+        id: capacity
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          node scripts/external-capacity-runner.mjs 2>&1 \
+            | tee capacity-artifacts/external-capacity.log
+          runner_status=${PIPESTATUS[0]}
+          grep '^\[external-capacity\] {' capacity-artifacts/external-capacity.log \
+            | tail -n 1 \
+            | sed 's/^\[external-capacity\] //' \
+            > capacity-artifacts/external-capacity.json
+          if [ -s capacity-artifacts/external-capacity.json ]; then
+            node -e 'JSON.parse(require("node:fs").readFileSync("capacity-artifacts/external-capacity.json", "utf8"))'
+          fi
+          echo "exit_code=$runner_status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Verify provider call count
+        id: provider
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          stats="$(curl --silent --fail http://127.0.0.1:4100/stats)"
+          stats_status=$?
+          if [ "$stats_status" -ne 0 ] || [ ! -s capacity-artifacts/external-capacity.json ]; then
+            echo "provider_count_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          provider_calls="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).providerCalls))' "$stats")"
+          accepted="$(node -e 'process.stdout.write(String(JSON.parse(require("node:fs").readFileSync("capacity-artifacts/external-capacity.json", "utf8")).accepted))')"
+          node -e 'const fs=require("node:fs"); fs.writeFileSync("capacity-artifacts/provider-count.json", JSON.stringify({providerCalls:Number(process.argv[1]),accepted:Number(process.argv[2]),exact:Number(process.argv[1])===Number(process.argv[2])}, null, 2)+"\n")' "$provider_calls" "$accepted"
+          if [ "$provider_calls" = "$accepted" ]; then
+            echo "provider_count_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "provider_count_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record hosted runner metadata
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p capacity-artifacts
+          node <<'NODE'
+          const fs = require("node:fs");
+          const os = require("node:os");
+          const metadata = {
+            profile: "profile-c-hosted",
+            environmentClass: "github-hosted-self-contained-baseline",
+            commitSha: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            runnerOs: process.env.RUNNER_OS,
+            runnerArch: process.env.RUNNER_ARCH,
+            nodeVersion: process.version,
+            cpuModel: os.cpus()[0]?.model ?? "unknown",
+            cpuCount: os.cpus().length,
+            totalMemoryBytes: os.totalmem(),
+            workload: {
+              messages: Number(process.env.EXTERNAL_CAPACITY_MESSAGES),
+              concurrency: Number(process.env.EXTERNAL_CAPACITY_CONCURRENCY),
+              targetRps: Number(process.env.EXTERNAL_CAPACITY_TARGET_RPS),
+            },
+            gates: {
+              acceptP95Ms: Number(process.env.EXTERNAL_CAPACITY_ACCEPT_P95_MS),
+              acceptP99Ms: Number(process.env.EXTERNAL_CAPACITY_ACCEPT_P99_MS),
+              maxErrorRate: Number(process.env.EXTERNAL_CAPACITY_MAX_ERROR_RATE),
+              drainMaxMs: Number(process.env.EXTERNAL_CAPACITY_DRAIN_MAX_MS),
+            },
+            topology: "one GitHub-hosted runner with separate API, worker, load-generator and controlled Meta processes plus service containers",
+            note: "Engineering baseline only; not production throughput certification",
+          };
+          fs.writeFileSync(
+            "capacity-artifacts/capacity-environment.json",
+            `${JSON.stringify(metadata, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Upload capacity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-c-hosted-${{ github.run_id }}
+          path: capacity-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop isolated capacity processes
+        if: always()
+        shell: bash
+        run: |
+          kill "${CAPACITY_WORKER_PID:-}" "${CAPACITY_API_PID:-}" "${CAPACITY_META_PID:-}" 2>/dev/null || true
+
+      - name: Enforce Profile C result
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.capacity.outputs.exit_code }}" = "0"
+          test "${{ steps.provider.outputs.provider_count_ok }}" = "true"
