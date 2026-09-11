@@ -31,7 +31,7 @@ describe("InboundMessageService", () => {
     message: { findUnique: messageFindUnique },
   };
   const phoneNumbers = { findByProviderPhoneNumberId };
-  const service = new InboundMessageService(prisma as never, phoneNumbers as never);
+  const service = new InboundMessageService(prisma as never, phoneNumbers as never, undefined as never);
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -39,7 +39,7 @@ describe("InboundMessageService", () => {
     messageFindUnique.mockResolvedValue(null);
     contactUpsert.mockResolvedValue({ id: "contact-1" });
     contactUpdateMany.mockResolvedValue({ count: 1 });
-    messageCreate.mockResolvedValue({ id: "message-1" });
+    messageCreate.mockResolvedValue({ id: "message-1", conversationId: null });
   });
 
   it("resolves the tenant from metadata.phone_number_id and opens a 24-hour service window", async () => {
@@ -79,6 +79,7 @@ describe("InboundMessageService", () => {
         providerMessageId: "wamid.inbound-1",
         providerTimestamp: inboundAt,
       }),
+      select: { id: true, conversationId: true },
     });
   });
 
