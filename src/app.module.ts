@@ -4,6 +4,7 @@ import { ApiKeysModule } from "./api-keys/api-keys.module.js";
 import { AuditModule } from "./audit/audit.module.js";
 import { AuthModule } from "./auth/auth.module.js";
 import { CampaignsModule } from "./campaigns/campaigns.module.js";
+import { CannedResponsesModule } from "./canned-responses/canned-responses.module.js";
 import { ContactsModule } from "./contacts/contacts.module.js";
 import { HealthModule } from "./health/health.module.js";
 import { InboxModule } from "./inbox/inbox.module.js";
@@ -32,6 +33,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module.js";
     PhoneNumbersModule,
     TemplatesModule,
     CampaignsModule,
+    CannedResponsesModule,
     QueueModule,
     OutboxModule,
     HealthModule,

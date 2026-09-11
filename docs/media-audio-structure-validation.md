@@ -30,9 +30,57 @@ The Ogg validator traverses the physical bitstream page by page and requires:
 - no page after an end-of-stream page for the same logical stream;
 - every logical stream to finish with EOS and no unfinished continued packet;
 - exact traversal to EOF with at least one payload byte;
-- at most 100,000 pages.
+- fewer than 100,000 pages.
 
-The validator does not decode Vorbis, Opus, Speex, FLAC, or another packet codec carried by Ogg. `audio/ogg` therefore proves an internally consistent Ogg container, not a specific audio codec.
+The generic `matchesOggStructure(filePath)` helper remains codec-neutral. Uploads do not use that helper alone: `matchesAudioStructure(filePath, "audio/ogg")` enables the additional mono Opus profile below during the same page traversal.
+
+### Mono Opus upload profile
+
+`audio/ogg` uploads require one logical Opus stream with these properties:
+
+- an exact 19-byte `OpusHead` identification packet, version `1`, one output channel, and mapping family `0`;
+- the identification packet alone on the first BOS page, with granule position `0`;
+- an `OpusTags` comment packet next, with all vendor, comment-count, and individual comment-length fields inside the packet;
+- the comment packet ending its page, with granule position `0`;
+- at least one complete, structurally valid Opus audio packet before EOS;
+- no chained or multiplexed streams, empty pages, or zero-octet audio packets.
+
+The packet assembler accepts headers and audio continued across pages. The identification packet is the exception: it must be complete on the first page. A page containing no complete packet must have granule position `-1`; a page completing audio packets must have a nonnegative granule position. Existing Ogg CRC, sequence, continuation, EOF, and EOS checks still apply.
+
+Resource bounds are application policy:
+
+| Resource | Limit |
+| --- | --- |
+| Reused packet assembly buffer | 64 KiB |
+| Complete OpusTags packet, including optional trailing bytes | 64 KiB |
+| Complete audio packet | 61,440 bytes |
+| Audio packets per upload | 100,000 |
+| Compressed bytes per Opus frame | 1,275 |
+| Declared audio duration per packet | 120 ms |
+
+Audio packet validation implements the four RFC 6716 framing codes, fixed- and variable-length frames, one- and two-byte frame lengths, frame-count limits, and padding. Legal zero-byte PLC/DTX frames within nonempty packets remain accepted. The identification header declares one output channel; the encoded packet's stereo bit is not forced to zero, because encoded channels and output channels are distinct in the Ogg Opus mapping.
+
+OpusTags trailing padding or unspecified binary data is permitted within the bounded packet. Metadata strings are not decoded, interpreted, or logged by this gate.
+
+### Compatibility and limits
+
+This is a deliberately restricted upload profile, not a claim to accept every valid Ogg or Opus file. Previously accepted generic Ogg containers, other codecs such as Vorbis, stereo-output streams, future/minor Opus header versions, other mapping families, chained streams, and oversized metadata are now rejected for `audio/ogg`. The version-1-only, mono/family-0, single-stream, empty-page, and resource restrictions are application admission decisions, not universal requirements of the format.
+
+The validator checks packet framing, not compressed sample contents. It does not decode or transcode audio, certify playability, validate the complete granule timeline or pre-skip/end-trim relationship, calculate whole-file duration, or replace malware scanning. Provider acceptance still depends on the provider's current media contract.
+
+No new dependency, endpoint, environment variable, or database migration is required. Invalid input follows the existing `MediaContentSignatureError` path before downstream side effects.
+
+References: [RFC 7845, Ogg Encapsulation for the Opus Audio Codec](https://www.rfc-editor.org/rfc/rfc7845.html), especially sections 3, 5, and 6; [RFC 6716, Opus packet framing](https://www.rfc-editor.org/rfc/rfc6716.html#section-3).
+
+### Opus regression tests
+
+Run the profile and packet-framing tests with the repository's normal test runner:
+
+```bash
+npm test -- test/media-ogg-opus-profile.spec.ts
+```
+
+The tests exercise the real MIME dispatcher with checksum-valid generated fixtures, including malformed headers, bounded metadata, continuation, missing EOS, foreign codecs, chain/multiplex rejection, packet framing, duration and size limits, and the existing container integrity gates. The generic container helper is tested separately to preserve its codec-neutral contract. Full repository lint, build, unit, integration, security, and Docker gates remain required before merge.
 
 ## AAC
 
