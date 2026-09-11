@@ -291,6 +291,11 @@ export class InboxService {
       await this.lockConversation(transaction, actor.tenantId, id);
       const existing = await transaction.conversation.findFirst({
         where: { id, tenantId: actor.tenantId },
+        include: {
+          teamAssignment: {
+            select: { teamId: true },
+          },
+        },
       });
       if (!existing) {
         throw new NotFoundException("Conversation not found");
@@ -313,6 +318,25 @@ export class InboxService {
         });
         if (!team) {
           throw new UnprocessableEntityException("Assigned inbox team is not active in this tenant");
+        }
+      }
+
+      const assignmentChanged = dto.assignedAgentId !== undefined || dto.assignedTeamId !== undefined;
+      if (assignmentChanged) {
+        const finalAgentId = dto.assignedAgentId === undefined
+          ? existing.assignedAgentId
+          : dto.assignedAgentId;
+        const finalTeamId = dto.assignedTeamId === undefined
+          ? existing.teamAssignment?.teamId ?? null
+          : dto.assignedTeamId;
+        if (finalAgentId && finalTeamId) {
+          await this.assertAgentTeamMembership(
+            transaction,
+            actor.tenantId,
+            finalTeamId,
+            finalAgentId,
+            "Assigned inbox agent is not a member of the assigned team",
+          );
         }
       }
 
@@ -374,6 +398,11 @@ export class InboxService {
       await this.lockConversation(transaction, actor.tenantId, id);
       const existing = await transaction.conversation.findFirst({
         where: { id, tenantId: actor.tenantId },
+        include: {
+          teamAssignment: {
+            select: { teamId: true },
+          },
+        },
       });
       if (!existing) {
         throw new NotFoundException("Conversation not found");
@@ -396,6 +425,17 @@ export class InboxService {
       }
       if (existing.assignedAgentId) {
         throw new ConflictException("Conversation is already assigned to another inbox agent");
+      }
+
+      const assignedTeamId = existing.teamAssignment?.teamId;
+      if (assignedTeamId) {
+        await this.assertAgentTeamMembership(
+          transaction,
+          actor.tenantId,
+          assignedTeamId,
+          agentId,
+          "Inbox agent is not a member of the assigned team",
+        );
       }
 
       const conversation = await transaction.conversation.update({
@@ -528,6 +568,22 @@ export class InboxService {
       WHERE "id" = ${id}::uuid AND "tenantId" = ${tenantId}::uuid
       FOR UPDATE
     `);
+  }
+
+  private async assertAgentTeamMembership(
+    transaction: Prisma.TransactionClient,
+    tenantId: string,
+    teamId: string,
+    agentId: string,
+    message: string,
+  ): Promise<void> {
+    const membership = await transaction.inboxTeamMember.findFirst({
+      where: { tenantId, teamId, agentId },
+      select: { teamId: true },
+    });
+    if (!membership) {
+      throw new UnprocessableEntityException(message);
+    }
   }
 
   private requiredText(value: string, label: string): string {
