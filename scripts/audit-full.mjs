@@ -1,3 +1,3 @@
 import { runDependencyAudit } from "./dependency-audit.mjs";
 
-process.exitCode = runDependencyAudit("runtime");
+process.exitCode = runDependencyAudit("full");
