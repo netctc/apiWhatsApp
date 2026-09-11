@@ -22,6 +22,7 @@ export class InboxRealtimeService implements OnModuleDestroy {
   private readonly publisher: Redis;
   private readonly subscriber: Redis;
   private readonly listeners = new Map<string, Set<(event: InboxRealtimeEvent) => void>>();
+  private readonly connectionClosers = new Set<() => void>();
   private subscribed = false;
   private activeConnections = 0;
 
@@ -76,6 +77,11 @@ export class InboxRealtimeService implements OnModuleDestroy {
     return true;
   }
 
+  registerConnectionCloser(closer: () => void): () => void {
+    this.connectionClosers.add(closer);
+    return () => this.connectionClosers.delete(closer);
+  }
+
   releaseConnection(): void {
     this.activeConnections = Math.max(0, this.activeConnections - 1);
   }
@@ -85,6 +91,8 @@ export class InboxRealtimeService implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    for (const closeConnection of [...this.connectionClosers]) closeConnection();
+    this.connectionClosers.clear();
     this.listeners.clear();
     await Promise.all([this.close(this.publisher), this.close(this.subscriber)]);
   }
@@ -126,6 +134,10 @@ export class InboxRealtimeService implements OnModuleDestroy {
   private safeData(value: unknown): InboxEventData {
     if (!value || typeof value !== "object" || Array.isArray(value)) return {};
     const data = value as Record<string, unknown>;
+    const conversationId = this.uuid(data.conversationId);
+    const messageId = this.uuid(data.messageId);
+    const noteId = this.uuid(data.noteId);
+    const cannedResponseId = this.uuid(data.cannedResponseId);
     const assignedAgentId = data.assignedAgentId === null ? null : this.uuid(data.assignedAgentId);
     const status = typeof data.status === "string" && CONVERSATION_STATUSES.has(data.status) ? data.status : undefined;
     const priority = typeof data.priority === "string" && CONVERSATION_PRIORITIES.has(data.priority) ? data.priority : undefined;
@@ -136,10 +148,10 @@ export class InboxRealtimeService implements OnModuleDestroy {
       ? data.revision as number
       : undefined;
     return {
-      ...(this.uuid(data.conversationId) ? { conversationId: this.uuid(data.conversationId) } : {}),
-      ...(this.uuid(data.messageId) ? { messageId: this.uuid(data.messageId) } : {}),
-      ...(this.uuid(data.noteId) ? { noteId: this.uuid(data.noteId) } : {}),
-      ...(this.uuid(data.cannedResponseId) ? { cannedResponseId: this.uuid(data.cannedResponseId) } : {}),
+      ...(conversationId ? { conversationId } : {}),
+      ...(messageId ? { messageId } : {}),
+      ...(noteId ? { noteId } : {}),
+      ...(cannedResponseId ? { cannedResponseId } : {}),
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(data.assignedAgentId === null || assignedAgentId ? { assignedAgentId } : {}),
