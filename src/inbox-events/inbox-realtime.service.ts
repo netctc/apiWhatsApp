@@ -139,6 +139,7 @@ export class InboxRealtimeService implements OnModuleDestroy {
     const noteId = this.uuid(data.noteId);
     const cannedResponseId = this.uuid(data.cannedResponseId);
     const assignedAgentId = data.assignedAgentId === null ? null : this.uuid(data.assignedAgentId);
+    const assignedTeamId = data.assignedTeamId === null ? null : this.uuid(data.assignedTeamId);
     const status = typeof data.status === "string" && CONVERSATION_STATUSES.has(data.status) ? data.status : undefined;
     const priority = typeof data.priority === "string" && CONVERSATION_PRIORITIES.has(data.priority) ? data.priority : undefined;
     const unreadCount = Number.isInteger(data.unreadCount) && (data.unreadCount as number) >= 0
@@ -155,6 +156,7 @@ export class InboxRealtimeService implements OnModuleDestroy {
       ...(status ? { status } : {}),
       ...(priority ? { priority } : {}),
       ...(data.assignedAgentId === null || assignedAgentId ? { assignedAgentId } : {}),
+      ...(data.assignedTeamId === null || assignedTeamId ? { assignedTeamId } : {}),
       ...(unreadCount === undefined ? {} : { unreadCount }),
       ...(revision === undefined ? {} : { revision }),
       ...(typeof data.active === "boolean" ? { active: data.active } : {}),
