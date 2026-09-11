@@ -47,6 +47,21 @@ const conversationSummaryInclude = {
       active: true,
     },
   },
+  teamAssignment: {
+    select: {
+      teamId: true,
+      createdAt: true,
+      updatedAt: true,
+      team: {
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          active: true,
+        },
+      },
+    },
+  },
   messages: {
     orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
     take: 1,
@@ -165,6 +180,9 @@ export class InboxService {
     if (query.unassigned && query.assignedAgentId) {
       throw new BadRequestException("assignedAgentId cannot be combined with unassigned=true");
     }
+    if (query.unassignedTeam && query.assignedTeamId) {
+      throw new BadRequestException("assignedTeamId cannot be combined with unassignedTeam=true");
+    }
 
     if (query.cursor) {
       const cursor = await this.prisma.conversation.findFirst({
@@ -182,6 +200,10 @@ export class InboxService {
       ...(query.priority ? { priority: query.priority } : {}),
       ...(query.assignedAgentId ? { assignedAgentId: query.assignedAgentId } : {}),
       ...(query.unassigned ? { assignedAgentId: null } : {}),
+      ...(query.assignedTeamId
+        ? { teamAssignment: { is: { tenantId, teamId: query.assignedTeamId } } }
+        : {}),
+      ...(query.unassignedTeam ? { teamAssignment: { is: null } } : {}),
       ...(query.senderId ? { senderId: query.senderId } : {}),
       ...(query.contactId ? { contactId: query.contactId } : {}),
     };
@@ -284,6 +306,34 @@ export class InboxService {
         }
       }
 
+      if (dto.assignedTeamId) {
+        const team = await transaction.inboxTeam.findFirst({
+          where: { id: dto.assignedTeamId, tenantId: actor.tenantId, active: true },
+          select: { id: true },
+        });
+        if (!team) {
+          throw new UnprocessableEntityException("Assigned inbox team is not active in this tenant");
+        }
+      }
+
+      if (dto.assignedTeamId !== undefined) {
+        if (dto.assignedTeamId === null) {
+          await transaction.conversationTeamAssignment.deleteMany({
+            where: { tenantId: actor.tenantId, conversationId: id },
+          });
+        } else {
+          await transaction.conversationTeamAssignment.upsert({
+            where: { conversationId: id },
+            create: {
+              tenantId: actor.tenantId,
+              conversationId: id,
+              teamId: dto.assignedTeamId,
+            },
+            update: { teamId: dto.assignedTeamId },
+          });
+        }
+      }
+
       const updated = await transaction.conversation.update({
         where: { id },
         data: {
@@ -304,6 +354,7 @@ export class InboxService {
         status: updated.status,
         priority: updated.priority,
         assigned: !!updated.assignedAgentId,
+        teamAssigned: updated.teamAssignment !== null,
       });
       if (audit) {
         await transaction.auditLog.create({ data: audit });

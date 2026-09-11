@@ -95,7 +95,7 @@ export class InboxController {
 
   @Patch("conversations/:id")
   @RequireScopes(ApiScope.INBOX_WRITE)
-  @ApiOperation({ summary: "Update conversation status, priority, or assignment" })
+  @ApiOperation({ summary: "Update conversation status, priority, agent assignment, or team assignment" })
   async updateConversation(
     @CurrentPrincipal() principal: ApiPrincipal,
     @Param("id", idPipe) id: string,
@@ -186,6 +186,7 @@ export class InboxController {
       status: ConversationStatus;
       priority: ConversationPriority;
       assignedAgentId: string | null;
+      teamAssignment: { teamId: string } | null;
       unreadCount: number;
     },
   ) {
@@ -194,6 +195,7 @@ export class InboxController {
       status: conversation.status,
       priority: conversation.priority,
       assignedAgentId: conversation.assignedAgentId,
+      assignedTeamId: conversation.teamAssignment?.teamId ?? null,
       unreadCount: conversation.unreadCount,
     });
   }

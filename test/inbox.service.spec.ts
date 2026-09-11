@@ -94,6 +94,7 @@ describe("InboxService", () => {
       status: ConversationStatus.PENDING,
       priority: ConversationPriority.HIGH,
       assignedAgentId: "33333333-3333-4333-8333-333333333333",
+      teamAssignment: null,
     });
     const auditLogCreate = jest.fn().mockResolvedValue({});
     const transaction = jest.fn().mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
@@ -134,6 +135,7 @@ describe("InboxService", () => {
           status: ConversationStatus.PENDING,
           priority: ConversationPriority.HIGH,
           assigned: true,
+          teamAssigned: false,
         },
       }),
     });
