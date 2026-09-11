@@ -453,6 +453,114 @@ export class InboxService {
     });
   }
 
+  async routeConversation(
+    principal: ApiPrincipal,
+    id: string,
+    context?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(principal);
+    return this.prisma.$transaction(async (transaction) => {
+      await this.lockConversation(transaction, actor.tenantId, id);
+      const existing = await transaction.conversation.findFirst({
+        where: { id, tenantId: actor.tenantId },
+        include: {
+          teamAssignment: {
+            select: { teamId: true },
+          },
+        },
+      });
+      if (!existing) {
+        throw new NotFoundException("Conversation not found");
+      }
+
+      if (existing.assignedAgentId) {
+        const conversation = await transaction.conversation.findFirstOrThrow({
+          where: { id, tenantId: actor.tenantId },
+          include: conversationSummaryInclude,
+        });
+        return { conversation, changed: false };
+      }
+
+      const teamId = existing.teamAssignment?.teamId;
+      if (!teamId) {
+        throw new UnprocessableEntityException(
+          "Conversation must be assigned to an inbox team before automatic routing",
+        );
+      }
+
+      const lockedTeam = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT "id"
+        FROM "InboxTeam"
+        WHERE "id" = ${teamId}::uuid
+          AND "tenantId" = ${actor.tenantId}::uuid
+          AND "active" = TRUE
+        FOR UPDATE
+      `);
+      if (lockedTeam.length === 0) {
+        throw new UnprocessableEntityException("Assigned inbox team is not active in this tenant");
+      }
+
+      const candidates = await transaction.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
+        SELECT membership."agentId"
+        FROM "InboxTeamMember" AS membership
+        INNER JOIN "InboxAgent" AS agent
+          ON agent."id" = membership."agentId"
+          AND agent."tenantId" = membership."tenantId"
+        WHERE membership."tenantId" = ${actor.tenantId}::uuid
+          AND membership."teamId" = ${teamId}::uuid
+          AND agent."active" = TRUE
+        ORDER BY membership."agentId" ASC
+        FOR SHARE OF membership, agent
+      `);
+      if (candidates.length === 0) {
+        throw new UnprocessableEntityException("Assigned inbox team has no active routing members");
+      }
+
+      const candidateIds = candidates.map((candidate) => candidate.agentId);
+      const groupedLoads = await transaction.conversation.groupBy({
+        by: ["assignedAgentId"],
+        where: {
+          tenantId: actor.tenantId,
+          assignedAgentId: { in: candidateIds },
+          status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] },
+        },
+        _count: { _all: true },
+      });
+      const loadByAgent = new Map<string, number>();
+      for (const row of groupedLoads) {
+        if (row.assignedAgentId) {
+          loadByAgent.set(row.assignedAgentId, row._count._all);
+        }
+      }
+
+      let selectedAgentId = candidateIds[0];
+      let selectedLoad = loadByAgent.get(selectedAgentId) ?? 0;
+      for (const candidateId of candidateIds.slice(1)) {
+        const load = loadByAgent.get(candidateId) ?? 0;
+        if (load < selectedLoad) {
+          selectedAgentId = candidateId;
+          selectedLoad = load;
+        }
+      }
+
+      const conversation = await transaction.conversation.update({
+        where: { id },
+        data: { assignedAgentId: selectedAgentId },
+        include: conversationSummaryInclude,
+      });
+      const audit = auditLogData(actor, context, "inbox.conversation.routed", "Conversation", id, {
+        strategy: "least_open_pending",
+        eligibleAgents: candidateIds.length,
+        selectedLoad,
+        assigned: true,
+      });
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+      return { conversation, changed: true };
+    });
+  }
+
   async releaseConversation(
     principal: ApiPrincipal,
     id: string,
