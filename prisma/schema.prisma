@@ -428,14 +428,15 @@ model Conversation {
 }
 
 model ConversationTeamAssignment {
-  tenantId      String       @db.Uuid
-  conversationId String      @id @db.Uuid
-  teamId        String       @db.Uuid
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  conversation  Conversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
-  team          InboxTeam    @relation(fields: [tenantId, teamId], references: [tenantId, id], onDelete: Cascade)
+  tenantId       String       @db.Uuid
+  conversationId String       @id @db.Uuid
+  teamId         String       @db.Uuid
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  conversation   Conversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
+  team           InboxTeam    @relation(fields: [tenantId, teamId], references: [tenantId, id], onDelete: Cascade)
 
+  @@unique([tenantId, conversationId])
   @@index([tenantId, teamId, updatedAt])
 }
 
