@@ -37,6 +37,7 @@ export class InboxEventsController {
     }
 
     let unsubscribe: (() => void) | undefined;
+    let unregisterCloser: (() => void) | undefined;
     let heartbeat: NodeJS.Timeout | undefined;
     let closed = false;
 
@@ -45,6 +46,7 @@ export class InboxEventsController {
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
       unsubscribe?.();
+      unregisterCloser?.();
       this.realtime.releaseConnection();
       if (!response.writableEnded) response.end();
     };
@@ -57,10 +59,17 @@ export class InboxEventsController {
       return true;
     };
 
+    unregisterCloser = this.realtime.registerConnectionCloser(close);
+    request.once("close", close);
+
     try {
       unsubscribe = await this.realtime.subscribe(principal.tenantId, (event) => {
         write(this.frame(event));
       });
+      if (closed) {
+        unsubscribe();
+        return;
+      }
 
       response.status(HttpStatus.OK);
       response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -71,7 +80,6 @@ export class InboxEventsController {
       write(": connected\n\n");
       heartbeat = setInterval(() => write(": heartbeat\n\n"), this.realtime.heartbeatMs());
       heartbeat.unref();
-      request.once("close", close);
     } catch (error) {
       close();
       if (!response.headersSent) {
