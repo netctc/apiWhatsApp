@@ -1,6 +1,6 @@
 # Agent Inbox and Conversations
 
-Release `0.18.0` adds the first tenant-scoped agent inbox foundation. The inbox is an operational read/write layer over the existing durable `Message` records; it does not introduce a second message store.
+Release `0.18.0` provides a tenant-scoped agent inbox foundation plus the first productivity extensions. The inbox is an operational read/write layer over the existing durable `Message` records; it does not introduce a second message store.
 
 ## Scope
 
@@ -12,11 +12,12 @@ The release provides:
 - priorities `LOW`, `NORMAL`, `HIGH`, and `URGENT`;
 - assignment to active tenant inbox agents;
 - unread counters;
-- internal notes;
+- append-only internal notes with paginated history;
+- tenant-owned canned responses with revision-safe editing;
 - paginated conversation and message-history reads;
 - automatic inbound conversation creation/reopening;
 - automatic linking of free-form outbound messages to the same conversation;
-- append-only audit events for agent and conversation administrative mutations.
+- append-only audit events for agent, conversation, and canned-response administrative mutations.
 
 ## Authorization
 
@@ -51,6 +52,7 @@ GET   /api/v1/inbox/conversations/{conversationId}
 PATCH /api/v1/inbox/conversations/{conversationId}
 POST  /api/v1/inbox/conversations/{conversationId}/read
 GET   /api/v1/inbox/conversations/{conversationId}/messages
+GET   /api/v1/inbox/conversations/{conversationId}/notes
 POST  /api/v1/inbox/conversations/{conversationId}/notes
 ```
 
@@ -63,6 +65,21 @@ Conversation listing supports bounded filters for status, priority, assignment, 
 - assigned agent.
 
 Sending `assignedAgentId: null` removes the assignment.
+
+### Canned responses
+
+```text
+POST  /api/v1/inbox/canned-responses
+GET   /api/v1/inbox/canned-responses
+GET   /api/v1/inbox/canned-responses/{responseId}
+PATCH /api/v1/inbox/canned-responses/{responseId}
+```
+
+Canned responses are tenant-owned reusable plain-text snippets for inbox/CRM clients. They are not Meta-approved WhatsApp templates and do not send messages automatically.
+
+Lists are cursor-paginated and can filter active/inactive rows or perform exact normalized shortcut lookup. Updates require `expectedRevision`; competing updates against the same revision have one winner and stale writers receive a conflict rather than silently overwriting newer content.
+
+See `docs/inbox-canned-responses.md` for limits, normalization rules, pagination behavior, audit boundaries, and rollback guidance.
 
 ## Conversation identity
 
@@ -107,6 +124,8 @@ Template traffic deliberately does not create or reopen an inbox conversation au
 
 Campaign orchestration therefore retains its existing behavior and does not create agent-inbox work items merely because a marketing message was sent.
 
+Canned responses do not bypass this outbound policy. A client may explicitly copy canned-response text into a normal outbound request or an internal note, but the copied text then follows the target endpoint's existing authorization and messaging rules.
+
 ## Unread semantics
 
 `unreadCount` represents inbound messages not acknowledged by the inbox consumer.
@@ -127,15 +146,27 @@ This gives useful ordering semantics:
 - if a resolve action commits after the inbound message, it remains resolved because the operator action occurred later;
 - mark-read and inbound increments cannot silently overwrite one another outside database lock ordering.
 
+Canned-response updates use optimistic revision checks. Notes remain append-only and therefore do not compete for a mutable revision.
+
 ## Internal notes
 
 Conversation notes are append-only records attached to the tenant and conversation. A note stores the API-key actor ID when available.
 
+The conversation detail response keeps a bounded recent-note preview. Older notes can be read through:
+
+```text
+GET /api/v1/inbox/conversations/{conversationId}/notes
+```
+
+The history endpoint is newest-first with deterministic `createdAt DESC, id DESC` ordering, bounded page sizes, tenant/conversation-scoped cursor validation, and `Cache-Control: private, no-store`. Read access does not mutate unread state, conversation activity, notes, messages, or audit logs.
+
 Note bodies are not copied into the administrative `AuditLog`. The note record itself is the content source of truth, avoiding duplicate sensitive text in a second ledger.
+
+See `docs/inbox-note-history.md` for the full response, cursor, privacy, and concurrency contract.
 
 ## Audit policy
 
-Agent creation/update and conversation status/priority/assignment mutations write audit events in the same PostgreSQL transaction as the administrative change.
+Agent creation/update, conversation status/priority/assignment mutations, and canned-response mutations write audit events in the same PostgreSQL transaction as the administrative change.
 
 Actions include:
 
@@ -143,15 +174,18 @@ Actions include:
 inbox.agent.created
 inbox.agent.updated
 inbox.conversation.updated
+inbox.canned_response.created
+inbox.canned_response.updated
 ```
 
-Audit metadata records structural facts such as changed field names, status, priority, and whether a conversation is assigned. It does not copy agent email/external IDs, contact data, message content, or note bodies.
+Audit metadata records structural facts such as changed field names, status, priority, assignment state, and canned-response revision. It does not copy agent email/external IDs, contact data, message content, note bodies, canned-response text, or raw API keys.
 
 ## Data model
 
 ```text
 Tenant
   ├─ InboxAgent
+  ├─ InboxCannedResponse
   └─ Conversation
        ├─ Contact
        ├─ WhatsAppPhoneNumber
@@ -164,7 +198,7 @@ Tenant
 
 ## Integration coverage
 
-CI applies the full Prisma migration history to an empty PostgreSQL database and runs both the existing core messaging integration suite and an inbox-specific suite.
+CI applies the full Prisma migration history to an empty PostgreSQL database and runs the core messaging suites plus inbox, note-history, canned-response, media, recovery, and cross-feature integration tests.
 
 The inbox integration proves:
 
@@ -184,17 +218,18 @@ signed Meta webhook
   -> free-form outbound links to same conversation
 ```
 
-The existing core test continues to prove the full outbound worker/Meta mock path and now also cleans the conversations created by free-form traffic.
+Additional regressions cover paginated note traversal, tenant/cursor isolation, concurrent canned-response revisions, mutable-filter pagination, explicit snippet-to-note copying, independent inbox/media scopes, and early rejection of invalid Ogg/Opus uploads while inbox endpoints remain usable.
+
+The existing core test continues to prove the full outbound worker/Meta mock path and also cleans the conversations created by free-form traffic.
 
 ## Deliberate boundaries
 
-This foundation does not yet provide:
+The inbox still does not provide:
 
 - SSO/user-session authentication for human agents;
 - realtime WebSocket/SSE inbox push;
 - teams/skills/round-robin assignment policies;
 - SLA timers and escalation policies;
-- canned responses;
 - message search/full-text indexing;
 - attachment proxy/storage for inbound media;
 - presence/typing indicators;
