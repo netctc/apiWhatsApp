@@ -23,26 +23,36 @@ describe("realtime inbox Redis fan-out integration", () => {
     const tenantB = randomUUID();
     const conversationId = randomUUID();
     const tenantBEvents: InboxRealtimeEvent[] = [];
+    let resolveEvent: (event: InboxRealtimeEvent) => void = () => undefined;
+    let rejectEvent: (error: Error) => void = () => undefined;
+    const eventPromise = new Promise<InboxRealtimeEvent>((resolve, reject) => {
+      resolveEvent = resolve;
+      rejectEvent = reject;
+    });
+    const timeout = setTimeout(() => rejectEvent(new Error("Timed out waiting for realtime inbox event")), 3000);
+    timeout.unref();
 
-    const eventPromise = new Promise<InboxRealtimeEvent>(async (resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Timed out waiting for realtime inbox event")), 3000);
-      timeout.unref();
-      await subscriber.subscribe(tenantA, (event) => {
-        clearTimeout(timeout);
-        resolve(event);
+    const unsubscribeA = await subscriber.subscribe(tenantA, (event) => {
+      clearTimeout(timeout);
+      resolveEvent(event);
+    });
+    const unsubscribeB = await subscriber.subscribe(tenantB, (event) => tenantBEvents.push(event));
+
+    try {
+      await publisher.publish(tenantA, "conversation.updated", { conversationId, unreadCount: 4 });
+      const event = await eventPromise;
+
+      expect(event).toMatchObject({
+        type: "conversation.updated",
+        data: { conversationId, unreadCount: 4 },
       });
-    });
-    await subscriber.subscribe(tenantB, (event) => tenantBEvents.push(event));
-
-    await publisher.publish(tenantA, "conversation.updated", { conversationId, unreadCount: 4 });
-    const event = await eventPromise;
-
-    expect(event).toMatchObject({
-      type: "conversation.updated",
-      data: { conversationId, unreadCount: 4 },
-    });
-    expect(event.id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(Number.isNaN(Date.parse(event.occurredAt))).toBe(false);
-    expect(tenantBEvents).toEqual([]);
+      expect(event.id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(Number.isNaN(Date.parse(event.occurredAt))).toBe(false);
+      expect(tenantBEvents).toEqual([]);
+    } finally {
+      clearTimeout(timeout);
+      unsubscribeA();
+      unsubscribeB();
+    }
   });
 });
