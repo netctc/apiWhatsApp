@@ -1,5 +1,17 @@
 import { matchesMimeSignature } from "../src/media/media-content-signature.js";
 
+function fileTypeBox(majorBrand: string, compatibleBrands: string[]): Buffer {
+  const box = Buffer.alloc(16 + compatibleBrands.length * 4);
+  box.writeUInt32BE(box.length, 0);
+  box.write("ftyp", 4, 4, "latin1");
+  box.write(majorBrand, 8, 4, "latin1");
+  box.writeUInt32BE(0, 12);
+  for (const [index, brand] of compatibleBrands.entries()) {
+    box.write(brand, 16 + index * 4, 4, "latin1");
+  }
+  return box;
+}
+
 describe("matchesMimeSignature", () => {
   it("recognizes image and PDF signatures", () => {
     expect(matchesMimeSignature(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), "image/jpeg")).toBe(true);
@@ -21,9 +33,9 @@ describe("matchesMimeSignature", () => {
     expect(matchesMimeSignature(Buffer.from("#!AMR\nframes", "ascii"), "audio/amr")).toBe(true);
   });
 
-  it("recognizes ISO-BMFF and 3GPP containers", () => {
-    const mp4 = Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]);
-    const threeGp = Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70, 0x33, 0x67, 0x70, 0x36]);
+  it("recognizes structured ISO-BMFF and 3GPP file-type boxes", () => {
+    const mp4 = fileTypeBox("isom", ["iso2", "mp42"]);
+    const threeGp = fileTypeBox("3gp6", ["3gp6", "isom"]);
 
     expect(matchesMimeSignature(mp4, "audio/mp4")).toBe(true);
     expect(matchesMimeSignature(mp4, "video/mp4")).toBe(true);

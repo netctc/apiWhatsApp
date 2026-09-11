@@ -1,4 +1,9 @@
 import { open } from "node:fs/promises";
+import {
+  matchesIsoBmffFileTypeSignature,
+  matchesIsoBmffStructure,
+  type IsoBmffMediaMimeType,
+} from "./media-isobmff-structure.js";
 import { matchesPdfStructure } from "./media-pdf-structure.js";
 
 const INSPECTION_BYTES = 8192;
@@ -75,6 +80,13 @@ export async function assertMediaContentSignature(filePath: string, mimeType: st
     }
   }
 
+  if (isIsoBmffMediaMimeType(normalizedMimeType)) {
+    const validContainer = await matchesIsoBmffStructure(filePath, normalizedMimeType);
+    if (!validContainer) {
+      throw new MediaContentSignatureError(normalizedMimeType);
+    }
+  }
+
   if (OOXML_MIME_TYPES.has(normalizedMimeType)) {
     const validPackage = await matchesOoxmlPackageIdentity(filePath, normalizedMimeType);
     if (!validPackage) {
@@ -108,9 +120,8 @@ export function matchesMimeSignature(sample: Buffer, mimeType: string): boolean 
       );
     case "audio/mp4":
     case "video/mp4":
-      return isIsoBmff(sample);
     case "video/3gpp":
-      return isIsoBmff(sample) && has3gppBrand(sample);
+      return matchesIsoBmffFileTypeSignature(sample, mimeType);
     case "text/plain":
       return !sample.includes(0x00);
     default:
@@ -122,6 +133,10 @@ export function matchesMimeSignature(sample: Buffer, mimeType: string): boolean 
       }
       return false;
   }
+}
+
+function isIsoBmffMediaMimeType(mimeType: string): mimeType is IsoBmffMediaMimeType {
+  return mimeType === "audio/mp4" || mimeType === "video/mp4" || mimeType === "video/3gpp";
 }
 
 async function readPrefix(filePath: string): Promise<Buffer> {
@@ -378,19 +393,4 @@ function isMp3(sample: Buffer): boolean {
     return false;
   }
   return (sample[1] & 0x06) !== 0;
-}
-
-function isIsoBmff(sample: Buffer): boolean {
-  const maxOffset = Math.min(sample.length - 4, 64);
-  for (let offset = 4; offset <= maxOffset; offset += 1) {
-    if (sample.subarray(offset, offset + 4).toString("ascii") === "ftyp") {
-      return true;
-    }
-  }
-  return false;
-}
-
-function has3gppBrand(sample: Buffer): boolean {
-  const ascii = sample.subarray(0, Math.min(sample.length, 96)).toString("ascii").toLowerCase();
-  return ascii.includes("3gp") || ascii.includes("3g2");
 }
