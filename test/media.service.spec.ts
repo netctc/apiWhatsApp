@@ -156,7 +156,11 @@ describe("MediaService", () => {
         expect.objectContaining({ internalSenderId: SENDER_ID }),
       );
       expect(mediaAssetUpdate).toHaveBeenCalledWith({
-        where: { id: expect.any(String) },
+        where: {
+          id: expect.any(String),
+          providerMediaId: null,
+          failedAt: null,
+        },
         data: expect.objectContaining({
           providerMediaId: "media-123",
           providerUploadedAt: expect.any(Date),
@@ -178,6 +182,39 @@ describe("MediaService", () => {
       };
       expect(reservation.data.expiresAt.getTime()).toBeGreaterThanOrEqual(startedAt + 30 * DAY_MS);
       expect(reservation.data.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 30 * DAY_MS);
+      await expectDeleted(temp.filePath);
+    } finally {
+      await rm(temp.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resurrect an asset when reconciliation wins before provider finalization", async () => {
+    const temp = await createTempFile();
+    mediaAssetUpdate.mockRejectedValueOnce(new Error("record no longer uploadable"));
+
+    try {
+      await expect(
+        service.upload(TENANT_ID, {}, {
+          path: temp.filePath,
+          mimetype: "image/jpeg",
+          size: temp.size,
+        }),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+      expect(uploadMedia).toHaveBeenCalledTimes(1);
+      expect(mediaAssetUpdate).toHaveBeenCalledWith({
+        where: {
+          id: expect.any(String),
+          providerMediaId: null,
+          failedAt: null,
+        },
+        data: expect.objectContaining({
+          providerMediaId: "media-123",
+          failedAt: null,
+          failureCode: null,
+        }),
+      });
+      expect(mediaAssetUpdate).toHaveBeenCalledTimes(1);
       await expectDeleted(temp.filePath);
     } finally {
       await rm(temp.directory, { recursive: true, force: true });

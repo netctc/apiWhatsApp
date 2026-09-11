@@ -204,7 +204,11 @@ export class MediaService {
         let completed: MediaAsset;
         try {
           completed = await this.prisma.mediaAsset.update({
-            where: { id: asset.id },
+            where: {
+              id: asset.id,
+              providerMediaId: null,
+              failedAt: null,
+            },
             data: {
               providerMediaId: uploaded.mediaId,
               providerUploadedAt,
