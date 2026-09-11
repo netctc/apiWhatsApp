@@ -129,6 +129,26 @@ export class InboxController {
     return result.conversation;
   }
 
+  @Post("conversations/:id/route")
+  @HttpCode(HttpStatus.OK)
+  @RequireScopes(ApiScope.INBOX_WRITE)
+  @ApiOperation({ summary: "Route an unassigned team conversation to the least-loaded active team member" })
+  async routeConversation(
+    @CurrentPrincipal() principal: ApiPrincipal,
+    @Param("id", idPipe) id: string,
+    @Req() request: Request,
+  ) {
+    const result = await this.inbox.routeConversation(
+      principal,
+      id,
+      auditRequestContext(request),
+    );
+    if (result.changed) {
+      await this.publishConversationUpdated(principal.tenantId, result.conversation);
+    }
+    return result.conversation;
+  }
+
   @Post("conversations/:id/release")
   @HttpCode(HttpStatus.OK)
   @RequireScopes(ApiScope.INBOX_WRITE)
