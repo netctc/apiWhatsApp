@@ -6,8 +6,8 @@ const PDF_XREF_TARGET_BYTES = 128;
 const PDF_VERSION_HEADER = /^%PDF-(?:1\.[0-9]|2\.0)(?:\r\n|\r|\n)/;
 const PDF_FINAL_SECTION = /startxref[\x00\x09\x0a\x0c\x0d\x20]+([0-9]+)[\x00\x09\x0a\x0c\x0d\x20]+%%EOF/g;
 const PDF_TRAILING_WHITESPACE = /^[\x00\x09\x0a\x0c\x0d\x20]*$/;
-const PDF_XREF_TABLE = /^xref(?:\r\n|\r|\n)/;
-const PDF_XREF_STREAM_OBJECT = /^[0-9]+[\x09\x20]+[0-9]+[\x09\x20]+obj(?:[\x00\x09\x0a\x0c\x0d\x20]|<)/;
+const PDF_XREF_TABLE = /^xref[\x00\x09\x0a\x0c\x0d\x20]/;
+const PDF_XREF_STREAM_OBJECT = /^[0-9]+[\x00\x09\x0a\x0c\x0d\x20]+[0-9]+[\x00\x09\x0a\x0c\x0d\x20]+obj(?:[\x00\x09\x0a\x0c\x0d\x20]|<)/;
 
 export async function matchesPdfStructure(filePath: string): Promise<boolean> {
   const handle = await open(filePath, "r");
