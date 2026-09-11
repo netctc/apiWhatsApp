@@ -1,4 +1,8 @@
 import { open } from "node:fs/promises";
+import {
+  matchesAudioStructure,
+  type StructuredAudioMimeType,
+} from "./media-audio-structure.js";
 import { matchesJpegStructure, matchesPngStructure } from "./media-image-structure.js";
 import {
   matchesIsoBmffFileTypeSignature,
@@ -88,6 +92,13 @@ export async function assertMediaContentSignature(filePath: string, mimeType: st
     }
   }
 
+  if (isStructuredAudioMimeType(normalizedMimeType)) {
+    const validAudio = await matchesAudioStructure(filePath, normalizedMimeType);
+    if (!validAudio) {
+      throw new MediaContentSignatureError(normalizedMimeType);
+    }
+  }
+
   if (normalizedMimeType === "application/pdf") {
     const validDocument = await matchesPdfStructure(filePath);
     if (!validDocument) {
@@ -148,6 +159,10 @@ export function matchesMimeSignature(sample: Buffer, mimeType: string): boolean 
       }
       return false;
   }
+}
+
+function isStructuredAudioMimeType(mimeType: string): mimeType is StructuredAudioMimeType {
+  return mimeType === "audio/ogg" || mimeType === "audio/aac" || mimeType === "audio/mpeg" || mimeType === "audio/amr";
 }
 
 function isIsoBmffMediaMimeType(mimeType: string): mimeType is IsoBmffMediaMimeType {
