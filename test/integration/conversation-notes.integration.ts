@@ -288,7 +288,10 @@ describe("conversation note history integration", () => {
     const document = SwaggerModule.createDocument(app, new DocumentBuilder()
       .setTitle("Note history integration").setVersion("test")
       .addApiKey({ type: "apiKey", in: "header", name: "X-API-Key" }, "apiKey").build());
-    const operation = document.paths["/api/v1/inbox/conversations/{conversationId}/notes"]?.get;
+    const notePath = document.paths["/api/v1/inbox/conversations/{id}/notes"];
+    const operation = notePath?.get;
+    expect(notePath?.post).toBeDefined();
+    expect(document.paths["/api/v1/inbox/conversations/{conversationId}/notes"]).toBeUndefined();
     expect(operation).toBeDefined();
     expect(operation?.security).toEqual([{ apiKey: [] }]);
     expect(operation?.responses["200"]).toMatchObject({

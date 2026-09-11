@@ -20,7 +20,7 @@ import { ListConversationNotesQueryDto } from "./dto/list-conversation-notes-que
 
 @ApiTags("inbox")
 @ApiSecurity("apiKey")
-@Controller("v1/inbox/conversations/:conversationId/notes")
+@Controller("v1/inbox/conversations/:id/notes")
 export class ConversationNotesController {
   constructor(private readonly notes: ConversationNotesService) {}
 
@@ -28,7 +28,7 @@ export class ConversationNotesController {
   @Header("Cache-Control", "private, no-store")
   @RequireScopes(ApiScope.INBOX_READ)
   @ApiOperation({ summary: "List internal conversation notes, newest first" })
-  @ApiParam({ name: "conversationId", schema: { type: "string", format: "uuid" } })
+  @ApiParam({ name: "id", schema: { type: "string", format: "uuid" } })
   @ApiOkResponse({ type: ConversationNotePageDto })
   @ApiBadRequestResponse({ description: "Invalid query or note cursor" })
   @ApiUnauthorizedResponse({ description: "Missing or invalid API key" })
@@ -36,7 +36,7 @@ export class ConversationNotesController {
   @ApiNotFoundResponse({ description: "Conversation not found in the authenticated tenant" })
   list(
     @CurrentPrincipal() principal: ApiPrincipal,
-    @Param("conversationId", new ParseUUIDPipe({ version: "4" })) conversationId: string,
+    @Param("id", new ParseUUIDPipe({ version: "4" })) conversationId: string,
     @Query() query: ListConversationNotesQueryDto,
   ): Promise<ConversationNotePageDto> {
     return this.notes.list(principal.tenantId, conversationId, query);
