@@ -153,6 +153,13 @@ describe("PNG structure validation", () => {
     });
   });
 
+  it("rejects chunk types with the reserved bit set", async () => {
+    const png = minimalPng({ beforeIdat: [pngChunk("abcD", Buffer.from([0x01]))] });
+    await withTempFile(png, async (filePath) => {
+      await expect(matchesPngStructure(filePath)).resolves.toBe(false);
+    });
+  });
+
   it("requires PLTE before IDAT for indexed-color PNG", async () => {
     const png = minimalPng({ ihdrChunk: ihdr({ colorType: 3, bitDepth: 8 }) });
     await withTempFile(png, async (filePath) => {
@@ -167,6 +174,25 @@ describe("PNG structure validation", () => {
     });
     await withTempFile(png, async (filePath) => {
       await expect(matchesPngStructure(filePath)).resolves.toBe(true);
+    });
+  });
+
+  it("rejects indexed palettes larger than the declared bit depth permits", async () => {
+    const png = minimalPng({
+      ihdrChunk: ihdr({ colorType: 3, bitDepth: 1 }),
+      beforeIdat: [
+        pngChunk(
+          "PLTE",
+          Buffer.from([
+            0xff, 0x00, 0x00,
+            0x00, 0xff, 0x00,
+            0x00, 0x00, 0xff,
+          ]),
+        ),
+      ],
+    });
+    await withTempFile(png, async (filePath) => {
+      await expect(matchesPngStructure(filePath)).resolves.toBe(false);
     });
   });
 
