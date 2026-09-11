@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { matchesPdfStructure } from "./media-pdf-structure.js";
 
 const INSPECTION_BYTES = 8192;
 const PDF_HEADER = Buffer.from("%PDF-", "ascii");
@@ -65,6 +66,13 @@ export async function assertMediaContentSignature(filePath: string, mimeType: st
 
   if (!matchesMimeSignature(sample, normalizedMimeType)) {
     throw new MediaContentSignatureError(normalizedMimeType);
+  }
+
+  if (normalizedMimeType === "application/pdf") {
+    const validDocument = await matchesPdfStructure(filePath);
+    if (!validDocument) {
+      throw new MediaContentSignatureError(normalizedMimeType);
+    }
   }
 
   if (OOXML_MIME_TYPES.has(normalizedMimeType)) {
