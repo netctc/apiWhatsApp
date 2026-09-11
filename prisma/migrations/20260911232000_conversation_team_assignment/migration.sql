@@ -12,6 +12,12 @@ CREATE TABLE "ConversationTeamAssignment" (
     CONSTRAINT "ConversationTeamAssignment_pkey" PRIMARY KEY ("conversationId")
 );
 
+-- Prisma requires the exact relation fields to be unique for a one-to-one relation.
+-- conversationId is already globally unique through the primary key; this composite key
+-- keeps the Prisma model and database relation contract identical.
+CREATE UNIQUE INDEX "ConversationTeamAssignment_tenantId_conversationId_key"
+    ON "ConversationTeamAssignment"("tenantId", "conversationId");
+
 CREATE INDEX "ConversationTeamAssignment_tenantId_teamId_updatedAt_idx"
     ON "ConversationTeamAssignment"("tenantId", "teamId", "updatedAt");
 
