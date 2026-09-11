@@ -73,10 +73,27 @@ both return 400 before page content is loaded. Cursor ownership is independent
 of the current status/shortcut filter, so deactivating an anchor does not make
 its ID foreign. Keep filters unchanged when following a traversal.
 
+The server captures only the owned anchor's `id` and `createdAt`, then selects
+rows strictly below that position: `createdAt < anchor.createdAt`, or an equal
+creation time and `id < anchor.id`. Tenant and current status/shortcut filters
+apply to both alternatives. There is no offset and no requirement for the anchor
+to remain in the filtered result set. In particular, deactivation, reactivation
+or shortcut changes on the anchor do not silently skip the next eligible row.
+
+The committed table uses PostgreSQL `TIMESTAMP(3)`, exactly matching JavaScript
+Date's millisecond precision. The timestamp comes from the database, never a
+caller-supplied field. Do not widen this column's precision without adapting the
+boundary representation and regression tests. This implementation is specific
+to the canned-response table, not a generic microsecond-precision paginator.
+
 Creation timestamps and IDs are immutable through this API. Newer inserts do
 not repeat previously returned older pages. This is not a snapshot or export:
 concurrent edits, activation changes or administrative deletion can change which
-rows match. A cursor deleted after its ownership check may yield an empty page.
+rows match. A cursor already deleted when the anchor is read returns 400. If
+administrative deletion occurs after the owned position has been captured, the
+current request still continues from that captured position; it does not look
+up the deleted row again. A later request reusing that deleted cursor returns
+400. No cross-request snapshot or transaction is held.
 Refresh the first page to see new responses. No full-text search or total count
 is performed. Tenant operators should manage library growth; there is no per-tenant
 creation quota in this slice.
@@ -142,6 +159,8 @@ No dependency or environment variable is added. This feature has no frontend.
 ```bash
 npm test -- test/canned-response.policy.spec.ts test/canned-responses-query.spec.ts test/canned-responses.service.spec.ts
 npm run test:integration -- test/integration/canned-responses.integration.ts
+npm test -- test/canned-response-pagination.spec.ts
+npm run test:integration -- test/integration/canned-response-pagination.integration.ts
 ```
 
 The integration suite uses the actual Nest application, tenant API keys and
@@ -149,9 +168,18 @@ PostgreSQL. It exercises independent scopes, normalized uniqueness (including
 concurrent creates), conditional-update races, audit rollback fault injection,
 107-row tied-timestamp pagination, newer inserts, tenant isolation, database
 constraints, cascade cleanup and generated OpenAPI. No live Meta token is used.
+The pagination regression suite adds active/inactive anchor transitions with
+tied and one-millisecond timestamps, renamed/reused shortcuts, timestamp/UUID
+ordering, exact final pages, safe cursor errors and unchanged read-only state.
+Eleven cases use the real HTTP route. One directly invokes the actual service
+with a deterministic scheduling hook between real PostgreSQL operations to
+verify deletion after anchor capture. Unit tests also assert that tenant and
+filters cannot be bypassed by the boundary's OR condition, both reads remain
+bounded, database errors propagate and no offset is introduced.
 Run the full repository CI, including security and Docker, before merge.
 
 References:
 - Nest validation: https://docs.nestjs.com/techniques/validation
 - Prisma database constraints: https://www.prisma.io/docs/orm/v7/reference/database-features
+- Prisma pagination: https://www.prisma.io/docs/orm/v7/prisma-client/queries/pagination
 - Existing inbox foundation: `inbox.md`

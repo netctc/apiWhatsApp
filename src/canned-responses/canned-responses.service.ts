@@ -41,19 +41,31 @@ export class CannedResponsesService {
     } catch (error) {
       this.rethrow(error);
     }
+    let position: Prisma.InboxCannedResponseWhereInput = {};
     if (query.cursor !== undefined) {
-      const anchor = await this.prisma.inboxCannedResponse.findFirst({ where: { id: query.cursor, tenantId }, select: { id: true } });
+      const anchor = await this.prisma.inboxCannedResponse.findFirst({
+        where: { id: query.cursor, tenantId }, select: { id: true, createdAt: true },
+      });
       if (!anchor) throw new BadRequestException("Canned response cursor is invalid for this tenant");
+      // The anchor may no longer match active/shortcut. Exclude its position, not
+      // the first matching row: cursor + skip: 1 would silently drop that row.
+      // This table uses TIMESTAMP(3), so its timestamp round-trips exactly via Date.
+      position = {
+        OR: [
+          { createdAt: { lt: anchor.createdAt } },
+          { createdAt: anchor.createdAt, id: { lt: anchor.id } },
+        ],
+      };
     }
     const rows = await this.prisma.inboxCannedResponse.findMany({
       where: {
         tenantId,
         ...(query.status === "all" ? {} : { active: query.status === "active" }),
         ...(shortcut === undefined ? {} : { shortcut }),
+        ...position,
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: query.limit + 1,
-      ...(query.cursor === undefined ? {} : { cursor: { id: query.cursor }, skip: 1 }),
       select,
     });
     const hasMore = rows.length > query.limit;

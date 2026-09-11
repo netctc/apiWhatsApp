@@ -66,10 +66,17 @@ describe("CannedResponsesService", () => {
     expect(model.findMany).toHaveBeenCalledWith({ where: { tenantId: principal.tenantId, active: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 51, select: { id: true, shortcut: true, title: true, body: true, active: true, revision: true, createdAt: true, updatedAt: true } });
   });
   it("uses the last returned item rather than the lookahead as cursor", async () => {
-    const { service, model } = setup(); model.findMany.mockResolvedValue([row, { ...row, id: "lookahead" }]);
-    expect(await service.list(principal.tenantId, { status: "all", limit: 1, cursor: row.id, shortcut: " HELLO " })).toEqual({ items: [row], nextCursor: row.id });
-    expect(model.findFirst).toHaveBeenCalledWith({ where: { id: row.id, tenantId: principal.tenantId }, select: { id: true } });
-    expect(model.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { tenantId: principal.tenantId, shortcut: "hello" }, cursor: { id: row.id }, skip: 1, take: 2 }));
+    const { service, model } = setup();
+    const older = { ...row, id: "22222222-2222-4222-8222-222222222222", shortcut: "older" };
+    model.findMany.mockResolvedValue([older, { ...row, id: "11111111-1111-4111-8111-111111111111", shortcut: "oldest" }]);
+    expect(await service.list(principal.tenantId, { status: "all", limit: 1, cursor: row.id })).toEqual({ items: [older], nextCursor: older.id });
+    expect(model.findFirst).toHaveBeenCalledWith({ where: { id: row.id, tenantId: principal.tenantId }, select: { id: true, createdAt: true } });
+    expect(model.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenantId: principal.tenantId, OR: [
+        { createdAt: { lt: row.createdAt } },
+        { createdAt: row.createdAt, id: { lt: row.id } },
+      ] }, take: 2,
+    }));
   });
   it("rejects a foreign cursor before loading page content", async () => {
     const { service, model } = setup(); model.findFirst.mockResolvedValue(null);
