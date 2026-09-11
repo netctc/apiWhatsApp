@@ -42,7 +42,7 @@ ADTS validation walks frames to EOF and requires:
 
 - the 12-bit sync word;
 - AAC layer bits set to zero;
-- a non-escape sampling-frequency index;
+- a defined sampling-frequency index from 0 through 12, rejecting reserved indices 13 and 14 plus escape index 15;
 - a 7-byte header when CRC is absent or a 9-byte header when CRC is present;
 - declared frame length greater than its header length;
 - every declared frame to remain inside the file;
@@ -59,7 +59,7 @@ ADIF validation parses a bounded prefix of at most 64 KiB and requires:
 - a complete optional copyright field when present;
 - bitstream type, bitrate, and program-configuration count fields;
 - all declared program configuration elements to fit inside the bounded header;
-- a non-escape sampling-frequency index;
+- a defined sampling-frequency index from 0 through 12;
 - at least one configured audio channel element;
 - structurally complete mixdown, element-tag, alignment, and bounded comment fields;
 - data remaining after the parsed ADIF configuration header.
