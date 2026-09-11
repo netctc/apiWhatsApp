@@ -19,11 +19,22 @@ export class ListConversationsQueryDto {
   @IsUUID()
   assignedAgentId?: string;
 
-  @ApiPropertyOptional({ description: "Return only unassigned conversations" })
+  @ApiPropertyOptional({ description: "Return only conversations without an assigned agent" })
   @IsOptional()
   @Transform(({ value }) => value === true || value === "true")
   @IsBoolean()
   unassigned?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  assignedTeamId?: string;
+
+  @ApiPropertyOptional({ description: "Return only conversations without an explicit team assignment" })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === "true")
+  @IsBoolean()
+  unassignedTeam?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()
