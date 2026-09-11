@@ -16,6 +16,7 @@ import { ApiScope } from "../auth/auth.constants.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
 import { RequireScopes } from "../auth/require-scopes.decorator.js";
+import { InboxRealtimeService } from "../inbox-events/inbox-realtime.service.js";
 import { CreateMessageDto } from "./dto/create-message.dto.js";
 import { ListMessagesQueryDto } from "./dto/list-messages-query.dto.js";
 import { MessagesService } from "./messages.service.js";
@@ -24,7 +25,10 @@ import { MessagesService } from "./messages.service.js";
 @ApiSecurity("apiKey")
 @Controller("v1/messages")
 export class MessagesController {
-  constructor(private readonly messagesService: MessagesService) {}
+  constructor(
+    private readonly messagesService: MessagesService,
+    private readonly realtime: InboxRealtimeService,
+  ) {}
 
   @Post()
   @RequireScopes(ApiScope.MESSAGES_WRITE)
@@ -46,6 +50,13 @@ export class MessagesController {
       ...dto,
       ...(idempotencyKey ? { idempotencyKey } : {}),
     });
+
+    if (message.conversationId) {
+      await this.realtime.publish(principal.tenantId, "conversation.message.created", {
+        conversationId: message.conversationId,
+        messageId: message.id,
+      });
+    }
 
     return {
       messageId: message.id,
