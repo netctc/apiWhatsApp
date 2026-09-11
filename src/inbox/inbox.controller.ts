@@ -6,6 +6,7 @@ import { ApiScope } from "../auth/auth.constants.js";
 import type { ApiPrincipal } from "../auth/auth.types.js";
 import { CurrentPrincipal } from "../auth/current-principal.decorator.js";
 import { RequireScopes } from "../auth/require-scopes.decorator.js";
+import { InboxRealtimeService } from "../inbox-events/inbox-realtime.service.js";
 import { CreateConversationNoteDto } from "./dto/create-conversation-note.dto.js";
 import { CreateInboxAgentDto } from "./dto/create-inbox-agent.dto.js";
 import { ListConversationMessagesQueryDto } from "./dto/list-conversation-messages-query.dto.js";
@@ -21,7 +22,10 @@ const idPipe = new ParseUUIDPipe({ version: "4" });
 @ApiSecurity("apiKey")
 @Controller("v1/inbox")
 export class InboxController {
-  constructor(private readonly inbox: InboxService) {}
+  constructor(
+    private readonly inbox: InboxService,
+    private readonly realtime: InboxRealtimeService,
+  ) {}
 
   @Post("agents")
   @RequireScopes(ApiScope.INBOX_WRITE)
@@ -90,33 +94,54 @@ export class InboxController {
   @Patch("conversations/:id")
   @RequireScopes(ApiScope.INBOX_WRITE)
   @ApiOperation({ summary: "Update conversation status, priority, or assignment" })
-  updateConversation(
+  async updateConversation(
     @CurrentPrincipal() principal: ApiPrincipal,
     @Param("id", idPipe) id: string,
     @Body() dto: UpdateConversationDto,
     @Req() request: Request,
   ) {
-    return this.inbox.updateConversation(principal, id, dto, auditRequestContext(request));
+    const updated = await this.inbox.updateConversation(principal, id, dto, auditRequestContext(request));
+    await this.realtime.publish(principal.tenantId, "conversation.updated", {
+      conversationId: updated.id,
+      status: updated.status,
+      priority: updated.priority,
+      assignedAgentId: updated.assignedAgentId,
+      unreadCount: updated.unreadCount,
+    });
+    return updated;
   }
 
   @Post("conversations/:id/read")
   @RequireScopes(ApiScope.INBOX_WRITE)
   @ApiOperation({ summary: "Mark a conversation as read" })
-  markRead(
+  async markRead(
     @CurrentPrincipal() principal: ApiPrincipal,
     @Param("id", idPipe) id: string,
   ) {
-    return this.inbox.markRead(principal, id);
+    const updated = await this.inbox.markRead(principal, id);
+    await this.realtime.publish(principal.tenantId, "conversation.updated", {
+      conversationId: updated.id,
+      status: updated.status,
+      priority: updated.priority,
+      assignedAgentId: updated.assignedAgentId,
+      unreadCount: updated.unreadCount,
+    });
+    return updated;
   }
 
   @Post("conversations/:id/notes")
   @RequireScopes(ApiScope.INBOX_WRITE)
   @ApiOperation({ summary: "Add an internal note to a conversation" })
-  addNote(
+  async addNote(
     @CurrentPrincipal() principal: ApiPrincipal,
     @Param("id", idPipe) id: string,
     @Body() dto: CreateConversationNoteDto,
   ) {
-    return this.inbox.addNote(principal, id, dto);
+    const note = await this.inbox.addNote(principal, id, dto);
+    await this.realtime.publish(principal.tenantId, "conversation.note.created", {
+      conversationId: id,
+      noteId: note.id,
+    });
+    return note;
   }
 }
