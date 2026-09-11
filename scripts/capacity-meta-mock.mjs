@@ -16,6 +16,13 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (request.method === "GET" && request.url === "/stats") {
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ providerCalls }));
+    return;
+  }
+
   if (request.method !== "POST" || !request.url?.endsWith("/messages")) {
     request.resume();
     response.statusCode = 404;
