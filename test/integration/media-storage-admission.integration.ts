@@ -8,6 +8,7 @@ import request from "supertest";
 import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
+import { minimalJpeg } from "../helpers/media-fixtures.js";
 
 const API_KEY_HASH_SECRET = "media-admission-integration-api-key-secret-0123456789";
 
@@ -164,7 +165,7 @@ describe("media storage admission integration", () => {
   });
 
   it("rejects a prospective retained file before registry/provider access when it would cross the reserve", async () => {
-    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x41, 0x42, 0xff, 0xd9]);
+    const jpeg = minimalJpeg();
 
     await request(app.getHttpServer())
       .post("/api/v1/media")
