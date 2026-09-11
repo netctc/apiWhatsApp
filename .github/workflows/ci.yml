@@ -69,8 +69,8 @@ jobs:
       META_APP_SECRET: integration-meta-app-secret
       META_WEBHOOK_VERIFY_TOKEN: integration-verify-token
       TEST_META_ACCESS_TOKEN: integration-meta-access-token
-      INTEGRATION_BURST_MESSAGES: 50
-      INTEGRATION_ACCEPT_P95_MS: 3000
+      INTEGRATION_BURST_MESSAGES: "50"
+      INTEGRATION_ACCEPT_P95_MS: "3000"
       CAPACITY_MESSAGES: "40"
       CAPACITY_CONCURRENCY: "10"
       CAPACITY_TARGET_RPS: "0"
@@ -164,5 +164,7 @@ jobs:
         run: node --test scripts/test/dependency-audit.test.mjs
       - name: Install full locked tree without lifecycle scripts
         run: npm ci --include=dev --include=peer --include=optional --ignore-scripts
+      - name: Verify Prisma transitive dependency compatibility
+        run: node --test scripts/test/prisma-dependency-compatibility.test.mjs
       - name: Block high or critical full-tree vulnerabilities
         run: node scripts/audit-full.mjs
