@@ -315,17 +315,18 @@ model CampaignRecipient {
 }
 
 model InboxAgent {
-  id            String         @id @default(uuid()) @db.Uuid
-  tenantId      String         @db.Uuid
-  externalId    String?
-  name          String
-  email         String?
-  active        Boolean        @default(true)
-  metadata      Json?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  conversations Conversation[]
+  id              String            @id @default(uuid()) @db.Uuid
+  tenantId        String            @db.Uuid
+  externalId      String?
+  name            String
+  email           String?
+  active          Boolean           @default(true)
+  metadata        Json?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations   Conversation[]
+  teamMemberships InboxTeamMember[]
 
   @@unique([tenantId, externalId])
   @@unique([tenantId, id])
@@ -333,14 +334,15 @@ model InboxAgent {
 }
 
 model InboxTeam {
-  id          String   @id @default(uuid()) @db.Uuid
-  tenantId    String   @db.Uuid
-  name        String   @db.VarChar(120)
-  description String?  @db.VarChar(500)
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id          String            @id @default(uuid()) @db.Uuid
+  tenantId    String            @db.Uuid
+  name        String            @db.VarChar(120)
+  description String?           @db.VarChar(500)
+  active      Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships InboxTeamMember[]
 
   @@unique([tenantId, name])
   @@unique([tenantId, id])
@@ -348,10 +350,12 @@ model InboxTeam {
 }
 
 model InboxTeamMember {
-  tenantId  String   @db.Uuid
-  teamId    String   @db.Uuid
-  agentId   String   @db.Uuid
-  createdAt DateTime @default(now())
+  tenantId  String     @db.Uuid
+  teamId    String     @db.Uuid
+  agentId   String     @db.Uuid
+  createdAt DateTime   @default(now())
+  team      InboxTeam  @relation(fields: [tenantId, teamId], references: [tenantId, id], onDelete: Cascade)
+  agent     InboxAgent @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Cascade)
 
   @@id([teamId, agentId])
   @@index([tenantId, agentId])
