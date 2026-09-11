@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ContactsModule } from "../contacts/contacts.module.js";
+import { InboxEventsModule } from "../inbox-events/inbox-events.module.js";
 import { InboxModule } from "../inbox/inbox.module.js";
 import { PhoneNumbersModule } from "../phone-numbers/phone-numbers.module.js";
 import { TemplatesModule } from "../templates/templates.module.js";
@@ -8,7 +9,7 @@ import { MessagesService } from "./messages.service.js";
 import { OutboundPolicyService } from "./outbound-policy.service.js";
 
 @Module({
-  imports: [ContactsModule, InboxModule, PhoneNumbersModule, TemplatesModule],
+  imports: [ContactsModule, InboxModule, InboxEventsModule, PhoneNumbersModule, TemplatesModule],
   controllers: [MessagesController],
   providers: [MessagesService, OutboundPolicyService],
   exports: [MessagesService],
