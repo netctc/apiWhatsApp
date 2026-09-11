@@ -17,6 +17,7 @@ export type InboxEventData = Readonly<{
   status?: string;
   priority?: string;
   assignedAgentId?: string | null;
+  assignedTeamId?: string | null;
   unreadCount?: number;
   revision?: number;
   active?: boolean;
