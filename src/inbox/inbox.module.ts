@@ -5,13 +5,26 @@ import { ConversationNotesController } from "./conversation-notes.controller.js"
 import { ConversationNotesService } from "./conversation-notes.service.js";
 import { InboxController } from "./inbox.controller.js";
 import { InboxService } from "./inbox.service.js";
+import { InboxSkillsController } from "./inbox-skills.controller.js";
+import { InboxSkillsService } from "./inbox-skills.service.js";
 import { InboxTeamsController } from "./inbox-teams.controller.js";
 import { InboxTeamsService } from "./inbox-teams.service.js";
 
 @Module({
   imports: [InboxEventsModule],
-  controllers: [InboxController, ConversationNotesController, InboxTeamsController],
-  providers: [InboxService, ConversationActivityService, ConversationNotesService, InboxTeamsService],
-  exports: [InboxService, ConversationActivityService, InboxTeamsService],
+  controllers: [
+    InboxController,
+    ConversationNotesController,
+    InboxTeamsController,
+    InboxSkillsController,
+  ],
+  providers: [
+    InboxService,
+    ConversationActivityService,
+    ConversationNotesService,
+    InboxTeamsService,
+    InboxSkillsService,
+  ],
+  exports: [InboxService, ConversationActivityService, InboxTeamsService, InboxSkillsService],
 })
 export class InboxModule {}
