@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { matchesJpegStructure, matchesPngStructure } from "./media-image-structure.js";
 import {
   matchesIsoBmffFileTypeSignature,
   matchesIsoBmffStructure,
@@ -71,6 +72,20 @@ export async function assertMediaContentSignature(filePath: string, mimeType: st
 
   if (!matchesMimeSignature(sample, normalizedMimeType)) {
     throw new MediaContentSignatureError(normalizedMimeType);
+  }
+
+  if (normalizedMimeType === "image/jpeg") {
+    const validImage = await matchesJpegStructure(filePath);
+    if (!validImage) {
+      throw new MediaContentSignatureError(normalizedMimeType);
+    }
+  }
+
+  if (normalizedMimeType === "image/png") {
+    const validImage = await matchesPngStructure(filePath);
+    if (!validImage) {
+      throw new MediaContentSignatureError(normalizedMimeType);
+    }
   }
 
   if (normalizedMimeType === "application/pdf") {

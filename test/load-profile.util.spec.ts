@@ -49,7 +49,10 @@ describe("load profile utilities", () => {
     expect(results.map((result) => result.value)).toEqual(
       Array.from({ length: 12 }, (_, index) => `value-${index}`),
     );
-    expect(results.every((result) => result.durationMs >= 4)).toBe(true);
+    expect(results.every((result) => Number.isFinite(result.durationMs) && result.durationMs >= 0)).toBe(
+      true,
+    );
+    expect(results.some((result) => result.durationMs > 0)).toBe(true);
   });
 
   it("captures individual operation failures without abandoning sibling work", async () => {

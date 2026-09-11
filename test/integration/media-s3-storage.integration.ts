@@ -7,6 +7,7 @@ import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
 import { MediaAssetRetentionService } from "../../src/media/media-asset-retention.service.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
+import { minimalJpeg } from "../helpers/media-fixtures.js";
 
 const API_KEY_HASH_SECRET = "media-s3-integration-api-key-secret-0123456789abcdef";
 const BUCKET = "media-integration-bucket";
@@ -206,7 +207,7 @@ describe("S3 retained media integration", () => {
   });
 
   it("persists in S3 before Meta, reports readiness/inventory, and deletes expired objects first", async () => {
-    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x41, 0x42, 0x43, 0xff, 0xd9]);
+    const jpeg = minimalJpeg();
     const initialPutCalls = s3Calls.filter((call) => call.method === "PUT").length;
     const initialProviderCalls = providerCalls;
 

@@ -10,6 +10,7 @@ import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
 import { MediaAssetRetentionService } from "../../src/media/media-asset-retention.service.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
+import { minimalJpeg } from "../helpers/media-fixtures.js";
 
 const API_KEY_HASH_SECRET = "media-registry-integration-api-key-secret-0123456789";
 const TTL_DAYS = 7;
@@ -212,7 +213,7 @@ describe("media asset registry integration", () => {
   });
 
   it("retains successful upload bytes under an internal key and exposes only safe storage evidence", async () => {
-    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x41, 0x42, 0xff, 0xd9]);
+    const jpeg = minimalJpeg();
 
     const upload = await request(app.getHttpServer())
       .post("/api/v1/media")

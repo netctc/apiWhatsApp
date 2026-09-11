@@ -12,6 +12,7 @@ import { MediaBinaryStorageError } from "../src/media/media-binary-storage.servi
 import { MediaMalwareScanError } from "../src/media/media-malware-scanner.service.js";
 import { MediaService } from "../src/media/media.service.js";
 import { MetaApiError } from "../src/meta/meta-api.error.js";
+import { minimalJpeg } from "./helpers/media-fixtures.js";
 
 const TENANT_ID = "123e4567-e89b-42d3-a456-426614174000";
 const OTHER_TENANT_ID = "123e4567-e89b-42d3-a456-426614174099";
@@ -19,7 +20,7 @@ const SENDER_ID = "123e4567-e89b-42d3-a456-426614174001";
 const ASSET_ID = "123e4567-e89b-42d3-a456-426614174002";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-async function createTempFile(bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9])) {
+async function createTempFile(bytes = minimalJpeg()) {
   const directory = await mkdtemp(join(tmpdir(), "api-whatsapp-media-test-"));
   const filePath = join(directory, "upload");
   await writeFile(filePath, bytes);
@@ -49,7 +50,7 @@ describe("MediaService", () => {
     providerMediaId: null,
     category: "IMAGE",
     mimeType: "image/jpeg",
-    size: 4,
+    size: minimalJpeg().length,
     scanMode: "DISABLED",
     scanStatus: "NOT_SCANNED",
     storageMode: "DISABLED",

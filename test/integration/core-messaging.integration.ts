@@ -7,6 +7,7 @@ import { ApiScope } from "../../src/auth/auth.constants.js";
 import { generateApiKey, hashApiKey } from "../../src/auth/api-key.util.js";
 import { ConsentStatus, MessageStatus, MessageType } from "../../src/generated/prisma/client.js";
 import { PrismaService } from "../../src/prisma/prisma.service.js";
+import { minimalJpeg } from "../helpers/media-fixtures.js";
 
 interface MetaMockCall {
   url: string;
@@ -404,7 +405,7 @@ describe("core messaging integration", () => {
 
   it("uploads bounded media through the tenant sender and Meta multipart endpoint", async () => {
     const initialMetaMediaCalls = metaMediaCalls.length;
-    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const jpeg = minimalJpeg();
 
     const response = await request(app.getHttpServer())
       .post("/api/v1/media")
