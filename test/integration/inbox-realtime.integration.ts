@@ -18,7 +18,7 @@ describe("realtime inbox Redis fan-out integration", () => {
     await Promise.all([publisher.onModuleDestroy(), subscriber.onModuleDestroy()]);
   });
 
-  it("fans out across service instances without crossing tenant boundaries", async () => {
+  it("fans out across service instances without crossing tenant boundaries or leaking extra fields", async () => {
     const tenantA = randomUUID();
     const tenantB = randomUUID();
     const conversationId = randomUUID();
@@ -39,7 +39,8 @@ describe("realtime inbox Redis fan-out integration", () => {
     const unsubscribeB = await subscriber.subscribe(tenantB, (event) => tenantBEvents.push(event));
 
     try {
-      await publisher.publish(tenantA, "conversation.updated", { conversationId, unreadCount: 4 });
+      const producerData = { conversationId, unreadCount: 4, body: "must-not-leak" };
+      await publisher.publish(tenantA, "conversation.updated", producerData);
       const event = await eventPromise;
 
       expect(event).toMatchObject({
@@ -48,6 +49,8 @@ describe("realtime inbox Redis fan-out integration", () => {
       });
       expect(event.id).toMatch(/^[0-9a-f-]{36}$/);
       expect(Number.isNaN(Date.parse(event.occurredAt))).toBe(false);
+      expect(event.data).not.toHaveProperty("body");
+      expect(JSON.stringify(event)).not.toContain("must-not-leak");
       expect(tenantBEvents).toEqual([]);
     } finally {
       clearTimeout(timeout);
