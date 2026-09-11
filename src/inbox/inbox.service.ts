@@ -312,6 +312,106 @@ export class InboxService {
     });
   }
 
+  async claimConversation(
+    principal: ApiPrincipal,
+    id: string,
+    agentId: string,
+    context?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(principal);
+    return this.prisma.$transaction(async (transaction) => {
+      await this.lockConversation(transaction, actor.tenantId, id);
+      const existing = await transaction.conversation.findFirst({
+        where: { id, tenantId: actor.tenantId },
+      });
+      if (!existing) {
+        throw new NotFoundException("Conversation not found");
+      }
+
+      const agent = await transaction.inboxAgent.findFirst({
+        where: { id: agentId, tenantId: actor.tenantId, active: true },
+        select: { id: true },
+      });
+      if (!agent) {
+        throw new UnprocessableEntityException("Inbox agent is not active in this tenant");
+      }
+
+      if (existing.assignedAgentId === agentId) {
+        const conversation = await transaction.conversation.findFirstOrThrow({
+          where: { id, tenantId: actor.tenantId },
+          include: conversationSummaryInclude,
+        });
+        return { conversation, changed: false };
+      }
+      if (existing.assignedAgentId) {
+        throw new ConflictException("Conversation is already assigned to another inbox agent");
+      }
+
+      const conversation = await transaction.conversation.update({
+        where: { id },
+        data: { assignedAgentId: agentId },
+        include: conversationSummaryInclude,
+      });
+      const audit = auditLogData(actor, context, "inbox.conversation.claimed", "Conversation", id, {
+        assigned: true,
+      });
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+      return { conversation, changed: true };
+    });
+  }
+
+  async releaseConversation(
+    principal: ApiPrincipal,
+    id: string,
+    agentId: string,
+    context?: AuditRequestContext,
+  ) {
+    const actor = mutationActor(principal);
+    return this.prisma.$transaction(async (transaction) => {
+      await this.lockConversation(transaction, actor.tenantId, id);
+      const existing = await transaction.conversation.findFirst({
+        where: { id, tenantId: actor.tenantId },
+      });
+      if (!existing) {
+        throw new NotFoundException("Conversation not found");
+      }
+
+      const agent = await transaction.inboxAgent.findFirst({
+        where: { id: agentId, tenantId: actor.tenantId },
+        select: { id: true },
+      });
+      if (!agent) {
+        throw new UnprocessableEntityException("Inbox agent is not in this tenant");
+      }
+
+      if (existing.assignedAgentId === null) {
+        const conversation = await transaction.conversation.findFirstOrThrow({
+          where: { id, tenantId: actor.tenantId },
+          include: conversationSummaryInclude,
+        });
+        return { conversation, changed: false };
+      }
+      if (existing.assignedAgentId !== agentId) {
+        throw new ConflictException("Conversation is assigned to another inbox agent");
+      }
+
+      const conversation = await transaction.conversation.update({
+        where: { id },
+        data: { assignedAgentId: null },
+        include: conversationSummaryInclude,
+      });
+      const audit = auditLogData(actor, context, "inbox.conversation.released", "Conversation", id, {
+        assigned: false,
+      });
+      if (audit) {
+        await transaction.auditLog.create({ data: audit });
+      }
+      return { conversation, changed: true };
+    });
+  }
+
   async markRead(principal: ApiPrincipal, id: string) {
     return this.prisma.$transaction(async (transaction) => {
       await this.lockConversation(transaction, principal.tenantId, id);
