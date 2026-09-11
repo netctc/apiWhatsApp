@@ -99,16 +99,22 @@ export async function matchesOggStructure(filePath: string): Promise<boolean> {
       const bos = (headerType & OGG_BOS) !== 0;
       const eos = (headerType & OGG_EOS) !== 0;
       const continued = (headerType & OGG_CONTINUED) !== 0;
+      if (continued && segmentCount === 0) {
+        return false;
+      }
       const prior = streams.get(serial);
 
       if (!prior) {
         if (!bos || continued || sequence !== 0) {
           return false;
         }
-      } else {
-        if (prior.ended || bos || sequence !== prior.nextSequence || continued !== prior.continuedPacket) {
-          return false;
-        }
+      } else if (
+        prior.ended ||
+        bos ||
+        sequence !== prior.nextSequence ||
+        continued !== prior.continuedPacket
+      ) {
+        return false;
       }
 
       const continuesToNextPage = segmentCount > 0 && lacing[segmentCount - 1] === 255;
@@ -159,18 +165,24 @@ export async function matchesAacStructure(filePath: string): Promise<boolean> {
     let frames = 0;
     while (offset < stat.size && frames < AAC_MAX_FRAMES) {
       const header = await readExactly(handle, 7, offset);
-      if (!header || header[0] !== 0xff || (header[1]! & 0xf0) !== 0xf0 || (header[1]! & 0x06) !== 0) {
+      if (
+        !header ||
+        header[0] !== 0xff ||
+        (header[1]! & 0xf0) !== 0xf0 ||
+        (header[1]! & 0x06) !== 0
+      ) {
         return false;
       }
 
       const protectionAbsent = (header[1]! & 0x01) !== 0;
       const samplingFrequencyIndex = (header[2]! >> 2) & 0x0f;
-      if (samplingFrequencyIndex === 0x0f) {
+      if (samplingFrequencyIndex >= 13) {
         return false;
       }
 
       const headerBytes = protectionAbsent ? 7 : 9;
-      const frameBytes = ((header[3]! & 0x03) << 11) | (header[4]! << 3) | (header[5]! >> 5);
+      const frameBytes =
+        ((header[3]! & 0x03) << 11) | (header[4]! << 3) | (header[5]! >> 5);
       if (frameBytes <= headerBytes || offset + frameBytes > stat.size) {
         return false;
       }
@@ -213,7 +225,10 @@ export async function matchesMpegAudioStructure(filePath: string): Promise<boole
         return false;
       }
       const tagPayloadBytes =
-        (sizeBytes[0]! << 21) | (sizeBytes[1]! << 14) | (sizeBytes[2]! << 7) | sizeBytes[3]!;
+        (sizeBytes[0]! << 21) |
+        (sizeBytes[1]! << 14) |
+        (sizeBytes[2]! << 7) |
+        sizeBytes[3]!;
       const footerBytes = majorVersion === 4 && (id3Header[5]! & 0x10) !== 0 ? 10 : 0;
       offset = 10 + tagPayloadBytes + footerBytes;
       if (offset > stat.size - 4) {
@@ -262,7 +277,9 @@ export async function matchesAmrStructure(filePath: string): Promise<boolean> {
       return false;
     }
 
-    const wideband = prefix.length >= AMR_WB_MAGIC.length && prefix.subarray(0, AMR_WB_MAGIC.length).equals(AMR_WB_MAGIC);
+    const wideband =
+      prefix.length >= AMR_WB_MAGIC.length &&
+      prefix.subarray(0, AMR_WB_MAGIC.length).equals(AMR_WB_MAGIC);
     const narrowband = prefix.subarray(0, AMR_NB_MAGIC.length).equals(AMR_NB_MAGIC);
     if (!wideband && !narrowband) {
       return false;
@@ -360,7 +377,7 @@ function parseProgramConfigElement(reader: BitReader): boolean {
   const validCc = reader.read(4);
   if (
     samplingFrequencyIndex === null ||
-    samplingFrequencyIndex === 0x0f ||
+    samplingFrequencyIndex >= 13 ||
     front === null ||
     side === null ||
     back === null ||
@@ -442,7 +459,12 @@ function mpegAudioFrameLength(header: Buffer): number | null {
   if (!bitrateKbps || !sampleRateBase) {
     return null;
   }
-  const sampleRate = versionBits === 3 ? sampleRateBase : versionBits === 2 ? sampleRateBase / 2 : sampleRateBase / 4;
+  const sampleRate =
+    versionBits === 3
+      ? sampleRateBase
+      : versionBits === 2
+        ? sampleRateBase / 2
+        : sampleRateBase / 4;
   const bitrate = bitrateKbps * 1000;
 
   if (layer === 1) {
@@ -464,7 +486,9 @@ function mpegBitrateKbps(mpeg1: boolean, layer: number, index: number): number {
     }
     return MPEG1_LAYER3_BITRATES[index] ?? 0;
   }
-  return layer === 1 ? (MPEG2_LAYER1_BITRATES[index] ?? 0) : (MPEG2_LAYER23_BITRATES[index] ?? 0);
+  return layer === 1
+    ? (MPEG2_LAYER1_BITRATES[index] ?? 0)
+    : (MPEG2_LAYER23_BITRATES[index] ?? 0);
 }
 
 function amrFrameBits(wideband: boolean, frameType: number): number | null {
@@ -499,7 +523,10 @@ function buildOggCrcTable(): Uint32Array {
   for (let index = 0; index < table.length; index += 1) {
     let value = (index << 24) >>> 0;
     for (let bit = 0; bit < 8; bit += 1) {
-      value = (value & 0x80000000) !== 0 ? (((value << 1) >>> 0) ^ 0x04c11db7) >>> 0 : (value << 1) >>> 0;
+      value =
+        (value & 0x80000000) !== 0
+          ? (((value << 1) >>> 0) ^ 0x04c11db7) >>> 0
+          : (value << 1) >>> 0;
     }
     table[index] = value;
   }
@@ -517,7 +544,12 @@ class BitReader {
   }
 
   read(length: number): number | null {
-    if (!Number.isInteger(length) || length < 0 || length > 32 || this.bitOffset + length > this.bytes.length * 8) {
+    if (
+      !Number.isInteger(length) ||
+      length < 0 ||
+      length > 32 ||
+      this.bitOffset + length > this.bytes.length * 8
+    ) {
       if (length > 32) {
         return this.skip(length) ? 0 : null;
       }
