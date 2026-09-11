@@ -1,4 +1,5 @@
 import { open } from "node:fs/promises";
+import { OggOpusProfile } from "./media-ogg-opus-profile.js";
 
 export type StructuredAudioMimeType = "audio/ogg" | "audio/aac" | "audio/mpeg" | "audio/amr";
 
@@ -44,7 +45,7 @@ export async function matchesAudioStructure(
 ): Promise<boolean> {
   switch (mimeType) {
     case "audio/ogg":
-      return matchesOggStructure(filePath);
+      return matchesOggStructure(filePath, true);
     case "audio/aac":
       return matchesAacStructure(filePath);
     case "audio/mpeg":
@@ -54,7 +55,10 @@ export async function matchesAudioStructure(
   }
 }
 
-export async function matchesOggStructure(filePath: string): Promise<boolean> {
+export async function matchesOggStructure(
+  filePath: string,
+  requireOpusProfile = false,
+): Promise<boolean> {
   const handle = await open(filePath, "r");
   try {
     const stat = await handle.stat();
@@ -63,6 +67,7 @@ export async function matchesOggStructure(filePath: string): Promise<boolean> {
     }
 
     const streams = new Map<number, OggStreamState>();
+    const opus = requireOpusProfile ? new OggOpusProfile() : undefined;
     let offset = 0;
     let pages = 0;
     let sawPayload = false;
@@ -122,6 +127,10 @@ export async function matchesOggStructure(filePath: string): Promise<boolean> {
         return false;
       }
 
+      if (opus && !opus.acceptPage(page)) {
+        return false;
+      }
+
       streams.set(serial, {
         nextSequence: (sequence + 1) >>> 0,
         continuedPacket: continuesToNextPage,
@@ -138,6 +147,7 @@ export async function matchesOggStructure(filePath: string): Promise<boolean> {
       pages < OGG_MAX_PAGES &&
       sawPayload &&
       streams.size > 0 &&
+      (!opus || opus.isComplete()) &&
       [...streams.values()].every((stream) => stream.ended && !stream.continuedPacket)
     );
   } finally {
