@@ -2,15 +2,19 @@ import { randomUUID } from "node:crypto";
 import { Injectable, Logger, OnModuleDestroy } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Redis } from "ioredis";
-import type {
-  InboxEventData,
-  InboxEventType,
-  InboxRealtimeEnvelope,
-  InboxRealtimeEvent,
+import {
+  INBOX_EVENT_TYPES,
+  type InboxEventData,
+  type InboxEventType,
+  type InboxRealtimeEnvelope,
+  type InboxRealtimeEvent,
 } from "./inbox-event.types.js";
 
 const CHANNEL = "api-whatsapp:inbox-events:v1";
 const DEFAULT_MAX_CONNECTIONS = 500;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CONVERSATION_STATUSES = new Set(["OPEN", "PENDING", "RESOLVED"]);
+const CONVERSATION_PRIORITIES = new Set(["LOW", "NORMAL", "HIGH", "URGENT"]);
 
 @Injectable()
 export class InboxRealtimeService implements OnModuleDestroy {
@@ -40,7 +44,7 @@ export class InboxRealtimeService implements OnModuleDestroy {
       id: randomUUID(),
       type,
       occurredAt: new Date().toISOString(),
-      data: { ...data },
+      data: this.safeData(data),
     };
     const envelope: InboxRealtimeEnvelope = { tenantId, event };
     try {
@@ -87,14 +91,66 @@ export class InboxRealtimeService implements OnModuleDestroy {
 
   private dispatch(payload: string): void {
     try {
-      const parsed = JSON.parse(payload) as Partial<InboxRealtimeEnvelope>;
-      if (!parsed || typeof parsed.tenantId !== "string" || !parsed.event || typeof parsed.event !== "object") return;
-      const listeners = this.listeners.get(parsed.tenantId);
+      const parsed = JSON.parse(payload) as unknown;
+      const envelope = this.safeEnvelope(parsed);
+      if (!envelope) return;
+      const listeners = this.listeners.get(envelope.tenantId);
       if (!listeners) return;
-      for (const listener of listeners) listener(parsed.event as InboxRealtimeEvent);
+      for (const listener of listeners) listener(envelope.event);
     } catch {
       this.logger.warn("Ignored malformed realtime inbox event");
     }
+  }
+
+  private safeEnvelope(value: unknown): InboxRealtimeEnvelope | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const candidate = value as Record<string, unknown>;
+    const tenantId = this.uuid(candidate.tenantId);
+    const rawEvent = candidate.event;
+    if (!tenantId || !rawEvent || typeof rawEvent !== "object" || Array.isArray(rawEvent)) return undefined;
+    const event = rawEvent as Record<string, unknown>;
+    const id = this.uuid(event.id);
+    const type = typeof event.type === "string" && INBOX_EVENT_TYPES.includes(event.type as InboxEventType)
+      ? event.type as InboxEventType
+      : undefined;
+    const occurredAt = typeof event.occurredAt === "string" && !Number.isNaN(Date.parse(event.occurredAt))
+      ? event.occurredAt
+      : undefined;
+    if (!id || !type || !occurredAt) return undefined;
+    return {
+      tenantId,
+      event: { id, type, occurredAt, data: this.safeData(event.data) },
+    };
+  }
+
+  private safeData(value: unknown): InboxEventData {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const data = value as Record<string, unknown>;
+    const assignedAgentId = data.assignedAgentId === null ? null : this.uuid(data.assignedAgentId);
+    const status = typeof data.status === "string" && CONVERSATION_STATUSES.has(data.status) ? data.status : undefined;
+    const priority = typeof data.priority === "string" && CONVERSATION_PRIORITIES.has(data.priority) ? data.priority : undefined;
+    const unreadCount = Number.isInteger(data.unreadCount) && (data.unreadCount as number) >= 0
+      ? data.unreadCount as number
+      : undefined;
+    const revision = Number.isInteger(data.revision) && (data.revision as number) >= 1
+      ? data.revision as number
+      : undefined;
+    return {
+      ...(this.uuid(data.conversationId) ? { conversationId: this.uuid(data.conversationId) } : {}),
+      ...(this.uuid(data.messageId) ? { messageId: this.uuid(data.messageId) } : {}),
+      ...(this.uuid(data.noteId) ? { noteId: this.uuid(data.noteId) } : {}),
+      ...(this.uuid(data.cannedResponseId) ? { cannedResponseId: this.uuid(data.cannedResponseId) } : {}),
+      ...(status ? { status } : {}),
+      ...(priority ? { priority } : {}),
+      ...(data.assignedAgentId === null || assignedAgentId ? { assignedAgentId } : {}),
+      ...(unreadCount === undefined ? {} : { unreadCount }),
+      ...(revision === undefined ? {} : { revision }),
+      ...(typeof data.active === "boolean" ? { active: data.active } : {}),
+    };
+  }
+
+  private uuid(value: unknown): string | undefined {
+    return typeof value === "string" && UUID.test(value) ? value : undefined;
   }
 
   private maxConnections(): number {
