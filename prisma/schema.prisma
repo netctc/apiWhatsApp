@@ -215,7 +215,7 @@ model Contact {
   serviceWindowExpiresAt DateTime?
   metadata               Json?
   createdAt              DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
+  updatedAt              DateTime            @updatedAt
   tenant                 Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   consentEvents          ContactConsentEvent[]
   campaignRecipients     CampaignRecipient[]
@@ -336,15 +336,16 @@ model InboxAgent {
 }
 
 model InboxTeam {
-  id          String            @id @default(uuid()) @db.Uuid
-  tenantId    String            @db.Uuid
-  name        String            @db.VarChar(120)
-  description String?           @db.VarChar(500)
-  active      Boolean           @default(true)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  memberships InboxTeamMember[]
+  id                      String                       @id @default(uuid()) @db.Uuid
+  tenantId                String                       @db.Uuid
+  name                    String                       @db.VarChar(120)
+  description             String?                      @db.VarChar(500)
+  active                  Boolean                      @default(true)
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
+  tenant                  Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  memberships             InboxTeamMember[]
+  conversationAssignments ConversationTeamAssignment[]
 
   @@unique([tenantId, name])
   @@unique([tenantId, id])
@@ -396,32 +397,46 @@ model InboxAgentSkill {
 }
 
 model Conversation {
-  id              String               @id @default(uuid()) @db.Uuid
-  tenantId        String               @db.Uuid
-  contactId       String               @db.Uuid
-  senderId        String               @db.Uuid
-  assignedAgentId String?              @db.Uuid
-  status          ConversationStatus   @default(OPEN)
-  priority        ConversationPriority @default(NORMAL)
-  unreadCount     Int                  @default(0)
+  id              String                      @id @default(uuid()) @db.Uuid
+  tenantId        String                      @db.Uuid
+  contactId       String                      @db.Uuid
+  senderId        String                      @db.Uuid
+  assignedAgentId String?                     @db.Uuid
+  status          ConversationStatus          @default(OPEN)
+  priority        ConversationPriority        @default(NORMAL)
+  unreadCount     Int                         @default(0)
   lastMessageAt   DateTime
   lastInboundAt   DateTime?
   lastOutboundAt  DateTime?
   resolvedAt      DateTime?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  contact         Contact              @relation(fields: [contactId], references: [id], onDelete: Restrict)
-  sender          WhatsAppPhoneNumber  @relation(fields: [senderId], references: [id], onDelete: Restrict)
-  assignedAgent   InboxAgent?          @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+  tenant          Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact         Contact                     @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  sender          WhatsAppPhoneNumber         @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  assignedAgent   InboxAgent?                 @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  teamAssignment  ConversationTeamAssignment?
   messages        Message[]
   notes           ConversationNote[]
 
   @@unique([tenantId, senderId, contactId])
+  @@unique([tenantId, id])
   @@index([tenantId, status, lastMessageAt])
   @@index([tenantId, assignedAgentId, status, lastMessageAt])
   @@index([tenantId, priority, lastMessageAt])
   @@index([contactId, lastMessageAt])
+}
+
+model ConversationTeamAssignment {
+  tenantId      String       @db.Uuid
+  conversationId String      @id @db.Uuid
+  teamId        String       @db.Uuid
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  conversation  Conversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
+  team          InboxTeam    @relation(fields: [tenantId, teamId], references: [tenantId, id], onDelete: Cascade)
+
+  @@index([tenantId, teamId, updatedAt])
 }
 
 model ConversationNote {
@@ -494,8 +509,8 @@ model Message {
   submittedAt          DateTime?
   sentAt               DateTime?
   deliveredAt          DateTime?
-  readAt                DateTime?
-  failedAt              DateTime?
+  readAt               DateTime?
+  failedAt             DateTime?
   tenant               Tenant?                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   sender               WhatsAppPhoneNumber?   @relation(fields: [senderId], references: [id], onDelete: Restrict)
   conversation         Conversation?          @relation(fields: [conversationId], references: [id], onDelete: SetNull)
@@ -549,8 +564,8 @@ model OutboxEvent {
   processingLeaseUntil DateTime?
   lastError            String?
   publishedAt          DateTime?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   @@index([publishedAt, nextAttemptAt, processingLeaseUntil, createdAt])
   @@index([aggregateType, aggregateId])
