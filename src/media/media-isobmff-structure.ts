@@ -46,13 +46,14 @@ export function matchesIsoBmffFileTypeSignature(
   let leadingBoxes = 0;
 
   while (offset + BASIC_BOX_HEADER_BYTES <= sample.length && leadingBoxes <= 8) {
-    const header = parseBoxHeader(sample, offset, sample.length);
-    if (!header) {
+    const availableBytes = sample.length - offset;
+    const header = parseBoxHeader(sample, offset, availableBytes);
+    if (!header || offset + header.size > sample.length) {
       return false;
     }
 
     if (header.type === FILE_TYPE_BOX) {
-      if (header.size > MAX_FILE_TYPE_BOX_BYTES || offset + header.size > sample.length) {
+      if (header.size > MAX_FILE_TYPE_BOX_BYTES) {
         return false;
       }
 
@@ -136,7 +137,7 @@ export async function matchesIsoBmffStructure(
     return (
       offset === fileStat.size &&
       boxCount > 0 &&
-      boxCount < MAX_TOP_LEVEL_BOXES &&
+      boxCount <= MAX_TOP_LEVEL_BOXES &&
       foundFileType &&
       foundMovie &&
       foundMediaData
