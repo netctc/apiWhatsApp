@@ -37,7 +37,6 @@ export class InboxEventsController {
     }
 
     let unsubscribe: (() => void) | undefined;
-    let unregisterCloser: (() => void) | undefined;
     let heartbeat: NodeJS.Timeout | undefined;
     let closed = false;
 
@@ -46,7 +45,7 @@ export class InboxEventsController {
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
       unsubscribe?.();
-      unregisterCloser?.();
+      unregisterCloser();
       this.realtime.releaseConnection();
       if (!response.writableEnded) response.end();
     };
@@ -59,7 +58,7 @@ export class InboxEventsController {
       return true;
     };
 
-    unregisterCloser = this.realtime.registerConnectionCloser(close);
+    const unregisterCloser = this.realtime.registerConnectionCloser(close);
     request.once("close", close);
 
     try {
