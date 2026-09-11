@@ -3,7 +3,7 @@
 import "dotenv/config";
 import { createHmac, randomBytes } from "node:crypto";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../src/generated/prisma/client.js";
+import { PrismaClient } from "../dist/generated/prisma/client.js";
 
 const connectionString = process.env.DATABASE_URL?.trim();
 const hashSecret = process.env.API_KEY_HASH_SECRET?.trim();
