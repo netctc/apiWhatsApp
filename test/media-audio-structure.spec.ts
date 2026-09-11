@@ -21,6 +21,32 @@ async function withTempFile<T>(bytes: Buffer, operation: (filePath: string) => P
   }
 }
 
+function rawOggPage(options: {
+  serial?: number;
+  sequence?: number;
+  headerType?: number;
+  lacing: number[];
+  body?: Buffer;
+}): Buffer {
+  const body = options.body ?? Buffer.alloc(options.lacing.reduce((sum, value) => sum + value, 0));
+  if (body.length !== options.lacing.reduce((sum, value) => sum + value, 0)) {
+    throw new Error("test Ogg body must equal the lacing sum");
+  }
+  const page = Buffer.alloc(27 + options.lacing.length + body.length);
+  page.write("OggS", 0, 4, "ascii");
+  page[4] = 0;
+  page[5] = options.headerType ?? 0x06;
+  page.writeBigInt64LE(0n, 6);
+  page.writeUInt32LE(options.serial ?? 7, 14);
+  page.writeUInt32LE(options.sequence ?? 0, 18);
+  page.writeUInt32LE(0, 22);
+  page[26] = options.lacing.length;
+  Buffer.from(options.lacing).copy(page, 27);
+  body.copy(page, 27 + options.lacing.length);
+  page.writeUInt32LE(oggCrc(page), 22);
+  return page;
+}
+
 function oggPage(options?: {
   serial?: number;
   sequence?: number;
@@ -31,19 +57,13 @@ function oggPage(options?: {
   if (body.length > 254) {
     throw new Error("test Ogg page body must fit one terminating lacing value");
   }
-  const page = Buffer.alloc(28 + body.length);
-  page.write("OggS", 0, 4, "ascii");
-  page[4] = 0;
-  page[5] = options?.headerType ?? 0x06;
-  page.writeBigInt64LE(0n, 6);
-  page.writeUInt32LE(options?.serial ?? 7, 14);
-  page.writeUInt32LE(options?.sequence ?? 0, 18);
-  page.writeUInt32LE(0, 22);
-  page[26] = 1;
-  page[27] = body.length;
-  body.copy(page, 28);
-  page.writeUInt32LE(oggCrc(page), 22);
-  return page;
+  return rawOggPage({
+    serial: options?.serial,
+    sequence: options?.sequence,
+    headerType: options?.headerType,
+    lacing: [body.length],
+    body,
+  });
 }
 
 function oggCrc(page: Buffer): number {
@@ -60,9 +80,10 @@ function buildOggCrcTable(): Uint32Array {
   for (let index = 0; index < table.length; index += 1) {
     let value = (index << 24) >>> 0;
     for (let bit = 0; bit < 8; bit += 1) {
-      value = (value & 0x80000000) !== 0
-        ? (((value << 1) >>> 0) ^ 0x04c11db7) >>> 0
-        : (value << 1) >>> 0;
+      value =
+        (value & 0x80000000) !== 0
+          ? (((value << 1) >>> 0) ^ 0x04c11db7) >>> 0
+          : (value << 1) >>> 0;
     }
     table[index] = value;
   }
@@ -117,29 +138,29 @@ class BitWriter {
 
 function minimalAdif(): Buffer {
   const bits = new BitWriter();
-  bits.write(0, 1); // copyright_id_present
-  bits.write(0, 1); // original_copy
-  bits.write(0, 1); // home
-  bits.write(1, 1); // variable bit-rate stream, no adif_buffer_fullness
+  bits.write(0, 1);
+  bits.write(0, 1);
+  bits.write(0, 1);
+  bits.write(1, 1);
   bits.write(128_000, 23);
-  bits.write(0, 4); // one program config element
+  bits.write(0, 4);
 
-  bits.write(0, 4); // element_instance_tag
-  bits.write(1, 2); // AAC LC object type
-  bits.write(4, 4); // 44.1 kHz
-  bits.write(1, 4); // one front element
-  bits.write(0, 4); // side
-  bits.write(0, 4); // back
-  bits.write(0, 2); // lfe
-  bits.write(0, 3); // assoc data
-  bits.write(0, 4); // valid cc
-  bits.write(0, 1); // mono mixdown absent
-  bits.write(0, 1); // stereo mixdown absent
-  bits.write(0, 1); // matrix mixdown absent
-  bits.write(0, 1); // front element is SCE
-  bits.write(0, 4); // front element tag
+  bits.write(0, 4);
+  bits.write(1, 2);
+  bits.write(4, 4);
+  bits.write(1, 4);
+  bits.write(0, 4);
+  bits.write(0, 4);
+  bits.write(0, 2);
+  bits.write(0, 3);
+  bits.write(0, 4);
+  bits.write(0, 1);
+  bits.write(0, 1);
+  bits.write(0, 1);
+  bits.write(0, 1);
+  bits.write(0, 4);
   bits.align();
-  bits.write(0, 8); // comment bytes
+  bits.write(0, 8);
 
   return Buffer.concat([Buffer.from("ADIF", "ascii"), bits.toBuffer(), Buffer.from([0x21])]);
 }
@@ -195,6 +216,26 @@ describe("Ogg structure validation", () => {
     });
   });
 
+  it("rejects an empty page that attempts to terminate a continued packet", async () => {
+    const first = rawOggPage({
+      serial: 9,
+      sequence: 0,
+      headerType: 0x02,
+      lacing: [255],
+      body: Buffer.alloc(255, 0x11),
+    });
+    const invalidEnd = rawOggPage({
+      serial: 9,
+      sequence: 1,
+      headerType: 0x05,
+      lacing: [],
+      body: Buffer.alloc(0),
+    });
+    await withTempFile(Buffer.concat([first, invalidEnd]), async (filePath) => {
+      await expect(matchesOggStructure(filePath)).resolves.toBe(false);
+    });
+  });
+
   it("rejects trailing bytes after the final page", async () => {
     await withTempFile(Buffer.concat([oggPage(), Buffer.from([0])]), async (filePath) => {
       await expect(matchesOggStructure(filePath)).resolves.toBe(false);
@@ -210,16 +251,19 @@ describe("AAC structure validation", () => {
     });
   });
 
-  it("rejects truncated ADTS frames and invalid sampling-frequency escape", async () => {
+  it("rejects truncated ADTS frames and reserved or escape sampling-frequency indices", async () => {
     const frame = adtsFrame();
     await withTempFile(frame.subarray(0, frame.length - 1), async (filePath) => {
       await expect(matchesAacStructure(filePath)).resolves.toBe(false);
     });
-    const invalid = Buffer.from(frame);
-    invalid[2] = (invalid[2]! & 0xc3) | 0x3c;
-    await withTempFile(invalid, async (filePath) => {
-      await expect(matchesAacStructure(filePath)).resolves.toBe(false);
-    });
+
+    for (const index of [13, 14, 15]) {
+      const invalid = Buffer.from(frame);
+      invalid[2] = (invalid[2]! & 0xc3) | (index << 2);
+      await withTempFile(invalid, async (filePath) => {
+        await expect(matchesAacStructure(filePath)).resolves.toBe(false);
+      });
+    }
   });
 
   it("accepts a bounded ADIF header with one program configuration and remaining audio data", async () => {
@@ -274,9 +318,12 @@ describe("AMR structure validation", () => {
   });
 
   it("rejects reserved narrowband frame types and truncated frames", async () => {
-    await withTempFile(Buffer.concat([Buffer.from("#!AMR\n", "ascii"), amrNbFrame(9, Buffer.alloc(0))]), async (filePath) => {
-      await expect(matchesAmrStructure(filePath)).resolves.toBe(false);
-    });
+    await withTempFile(
+      Buffer.concat([Buffer.from("#!AMR\n", "ascii"), amrNbFrame(9, Buffer.alloc(0))]),
+      async (filePath) => {
+        await expect(matchesAmrStructure(filePath)).resolves.toBe(false);
+      },
+    );
     const valid = Buffer.concat([Buffer.from("#!AMR\n", "ascii"), amrNbFrame()]);
     await withTempFile(valid.subarray(0, valid.length - 1), async (filePath) => {
       await expect(matchesAmrStructure(filePath)).resolves.toBe(false);
@@ -286,8 +333,11 @@ describe("AMR structure validation", () => {
   it("rejects non-zero storage padding bits", async () => {
     const payload = Buffer.alloc(15);
     payload[payload.length - 1] = 0x01;
-    await withTempFile(Buffer.concat([Buffer.from("#!AMR\n", "ascii"), amrNbFrame(2, payload)]), async (filePath) => {
-      await expect(matchesAmrStructure(filePath)).resolves.toBe(false);
-    });
+    await withTempFile(
+      Buffer.concat([Buffer.from("#!AMR\n", "ascii"), amrNbFrame(2, payload)]),
+      async (filePath) => {
+        await expect(matchesAmrStructure(filePath)).resolves.toBe(false);
+      },
+    );
   });
 });
