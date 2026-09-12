@@ -1,6 +1,9 @@
 import { jest } from "@jest/globals";
 import { UnprocessableEntityException } from "@nestjs/common";
-import { ConversationStatus } from "../src/generated/prisma/client.js";
+import {
+  ConversationStatus,
+  InboxAgentPresenceStatus,
+} from "../src/generated/prisma/client.js";
 import { InboxService } from "../src/inbox/inbox.service.js";
 
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
@@ -32,13 +35,25 @@ function setup(options: {
   assignedAgentId?: string | null;
   teamAssigned?: boolean;
   teamActive?: boolean;
-  candidates?: string[];
+  candidates?: Array<{
+    agentId: string;
+    presenceStatus?: InboxAgentPresenceStatus;
+    maxConcurrentConversations?: number | null;
+  }>;
   loads?: Array<{ assignedAgentId: string; count: number }>;
 } = {}) {
   const assignedAgentId = options.assignedAgentId ?? null;
   const teamAssigned = options.teamAssigned ?? true;
   const teamActive = options.teamActive ?? true;
-  const candidateIds = options.candidates ?? [AGENT_A, AGENT_B];
+  const candidates = options.candidates ?? [
+    { agentId: AGENT_A },
+    { agentId: AGENT_B },
+  ];
+  const candidateRows = candidates.map((candidate) => ({
+    agentId: candidate.agentId,
+    presenceStatus: candidate.presenceStatus ?? InboxAgentPresenceStatus.AVAILABLE,
+    maxConcurrentConversations: candidate.maxConcurrentConversations ?? null,
+  }));
   const existing = {
     id: CONVERSATION_ID,
     tenantId: TENANT_ID,
@@ -51,8 +66,11 @@ function setup(options: {
   if (assignedAgentId === null && teamAssigned) {
     queryRaw.mockResolvedValueOnce(teamActive ? [{ id: TEAM_ID }] : []);
     if (teamActive) {
-      queryRaw.mockResolvedValueOnce(candidateIds.map((agentId) => ({ agentId })));
-      if (candidateIds.length > 0) queryRaw.mockResolvedValueOnce([]);
+      queryRaw.mockResolvedValueOnce(candidateRows);
+      if (candidateRows.length > 0 && candidateRows.some((candidate) =>
+        candidate.presenceStatus === InboxAgentPresenceStatus.AVAILABLE)) {
+        queryRaw.mockResolvedValueOnce([]);
+      }
     }
   }
 
@@ -80,7 +98,7 @@ function setup(options: {
 }
 
 describe("InboxService least-loaded routing", () => {
-  it("selects the active team member with the lowest OPEN/PENDING workload", async () => {
+  it("selects the available active team member with the lowest OPEN/PENDING workload", async () => {
     const { service, groupBy, update, auditLogCreate } = setup({
       loads: [
         { assignedAgentId: AGENT_A, count: 3 },
@@ -108,6 +126,8 @@ describe("InboxService least-loaded routing", () => {
         action: "inbox.conversation.routed",
         metadata: expect.objectContaining({
           strategy: "least_open_pending",
+          availableAgents: 2,
+          presenceUnavailableAgents: 0,
           eligibleAgents: 2,
           selectedLoad: 1,
           assigned: true,
@@ -115,6 +135,33 @@ describe("InboxService least-loaded routing", () => {
       }),
     });
     expect(result.changed).toBe(true);
+  });
+
+  it("excludes AWAY agents before workload comparison", async () => {
+    const { service, groupBy, update, auditLogCreate } = setup({
+      candidates: [
+        { agentId: AGENT_A, presenceStatus: InboxAgentPresenceStatus.AVAILABLE },
+        { agentId: AGENT_B, presenceStatus: InboxAgentPresenceStatus.AWAY },
+      ],
+      loads: [{ assignedAgentId: AGENT_A, count: 4 }],
+    });
+
+    await service.routeConversation(principal, CONVERSATION_ID);
+
+    expect(groupBy).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ assignedAgentId: { in: [AGENT_A] } }),
+    }));
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { assignedAgentId: AGENT_A },
+    }));
+    expect(auditLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({
+          availableAgents: 1,
+          presenceUnavailableAgents: 1,
+        }),
+      }),
+    });
   });
 
   it("breaks equal workloads by ascending agent ID", async () => {
@@ -181,6 +228,22 @@ describe("InboxService least-loaded routing", () => {
 
     await expect(service.routeConversation(principal, CONVERSATION_ID))
       .rejects.toThrow("Assigned inbox team has no active routing members");
+
+    expect(queryRaw).toHaveBeenCalledTimes(3);
+    expect(groupBy).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a team whose active routing members are all unavailable", async () => {
+    const { service, queryRaw, groupBy, update } = setup({
+      candidates: [
+        { agentId: AGENT_A, presenceStatus: InboxAgentPresenceStatus.AWAY },
+        { agentId: AGENT_B, presenceStatus: InboxAgentPresenceStatus.OFFLINE },
+      ],
+    });
+
+    await expect(service.routeConversation(principal, CONVERSATION_ID))
+      .rejects.toThrow("Assigned inbox team has no available routing members");
 
     expect(queryRaw).toHaveBeenCalledTimes(3);
     expect(groupBy).not.toHaveBeenCalled();
