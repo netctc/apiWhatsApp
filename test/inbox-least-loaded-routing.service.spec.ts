@@ -52,6 +52,7 @@ function setup(options: {
     queryRaw.mockResolvedValueOnce(teamActive ? [{ id: TEAM_ID }] : []);
     if (teamActive) {
       queryRaw.mockResolvedValueOnce(candidateIds.map((agentId) => ({ agentId })));
+      if (candidateIds.length > 0) queryRaw.mockResolvedValueOnce([]);
     }
   }
 
