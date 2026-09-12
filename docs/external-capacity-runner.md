@@ -57,23 +57,67 @@ When omitted, the API's active default sender is used.
 ## Workload configuration
 
 ```text
-EXTERNAL_CAPACITY_PROFILE_NAME        default: profile-c-external
-EXTERNAL_CAPACITY_MESSAGES            default: 100000, range: 1..1000000
-EXTERNAL_CAPACITY_CONCURRENCY         default: 500, range: 1..messages
-EXTERNAL_CAPACITY_TARGET_RPS          default: 0, range: 0..10000
-EXTERNAL_CAPACITY_ACCEPT_P95_MS       default: 3000
-EXTERNAL_CAPACITY_ACCEPT_P99_MS       default: 5000
-EXTERNAL_CAPACITY_MAX_ERROR_RATE      default: 0
-EXTERNAL_CAPACITY_DRAIN_MAX_MS        default: 1800000, maximum: 24 hours
-EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS default: 5000, range: 250..60000
-EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS  default: 10000, range: 100..120000
+EXTERNAL_CAPACITY_PROFILE_NAME                  default: profile-c-external
+EXTERNAL_CAPACITY_MESSAGES                      default: 100000, range: 1..1000000
+EXTERNAL_CAPACITY_DURATION_SECONDS              default: 0, range: 0..21600
+EXTERNAL_CAPACITY_MAX_MESSAGES                  default: 1000000, range: 1..1000000
+EXTERNAL_CAPACITY_CONCURRENCY                   default: 500, range: 1..active attempt ceiling
+EXTERNAL_CAPACITY_TARGET_RPS                    default: 0, range: 0..10000
+EXTERNAL_CAPACITY_MIN_START_RATE_RATIO          default: 0.95, range: 0..1
+EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING            optional non-negative integer
+EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS optional non-negative integer
+EXTERNAL_CAPACITY_ACCEPT_P95_MS                 default: 3000
+EXTERNAL_CAPACITY_ACCEPT_P99_MS                 default: 5000
+EXTERNAL_CAPACITY_MAX_ERROR_RATE                default: 0
+EXTERNAL_CAPACITY_DRAIN_MAX_MS                  default: 1800000, maximum: 24 hours
+EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS          default: 5000, range: 250..60000
+EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS            default: 10000, range: 100..120000
 ```
 
-`EXTERNAL_CAPACITY_TARGET_RPS=0` disables pacing. Positive values schedule request starts at approximately the configured rate while the concurrency setting remains the hard in-flight ceiling.
+`EXTERNAL_CAPACITY_DURATION_SECONDS=0` keeps the historical fixed-message contract. In fixed mode the runner attempts exactly `EXTERNAL_CAPACITY_MESSAGES`, subject to the hard safety rule that `EXTERNAL_CAPACITY_MESSAGES <= EXTERNAL_CAPACITY_MAX_MESSAGES`.
+
+A positive duration enables duration-bounded soak mode. Duration mode requires `EXTERNAL_CAPACITY_TARGET_RPS > 0`, stops scheduling new requests at the configured deadline, and lets already-started requests finish. The maximum number of attempts is always capped by `EXTERNAL_CAPACITY_MAX_MESSAGES`.
+
+The runner validates the requested duration, target rate, minimum start-rate ratio, and message ceiling before contacting the target. A configuration whose safety ceiling cannot possibly satisfy the requested minimum start-rate ratio is rejected before the baseline snapshot.
+
+### Monotonic no-catch-up pacing
+
+Positive target rates use a serialized monotonic start gate. Each next allowed start is derived from the previous actual start. If the load generator pauses or becomes CPU-starved, missed pacing slots are discarded rather than recovered as a burst. Concurrency remains the hard in-flight ceiling.
+
+This differs intentionally from absolute-slot scheduling. A delayed runner therefore reports an achieved start-rate shortfall instead of hiding the load-generator bottleneck behind catch-up traffic.
+
+### Start-rate gate
+
+Duration mode reports:
+
+```text
+attempted
+achievedStartRatePerSecond
+achievedStartRateRatio
+```
+
+The ratio is:
+
+```text
+actual attempts / (duration seconds * requested target RPS)
+```
+
+The run fails when `achievedStartRateRatio < EXTERNAL_CAPACITY_MIN_START_RATE_RATIO`. The default minimum is `0.95`.
+
+### Optional queue-health gates
+
+When configured, the runner also fails if any sampled operations snapshot exceeds:
+
+```text
+EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING
+EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS
+```
+
+These gates apply to the maximum observed values over acceptance and drain. Unset variables disable the corresponding gate.
 
 ## Profile C example
 
-Profile C should run from a host that is independent from the API/worker replicas so the load generator does not consume the same CPU and memory being measured.
+Profile C remains a fixed-message run and should execute from a host independent from the API/worker replicas.
 
 ```bash
 EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV=true \
@@ -82,6 +126,7 @@ EXTERNAL_CAPACITY_BASE_URL=https://capacity-api.example.test \
 EXTERNAL_CAPACITY_API_KEY="$CAPACITY_API_KEY" \
 EXTERNAL_CAPACITY_RECIPIENTS=+15550000001 \
 EXTERNAL_CAPACITY_MESSAGES=100000 \
+EXTERNAL_CAPACITY_MAX_MESSAGES=100000 \
 EXTERNAL_CAPACITY_CONCURRENCY=500 \
 EXTERNAL_CAPACITY_TARGET_RPS=0 \
 EXTERNAL_CAPACITY_ACCEPT_P95_MS=3000 \
@@ -93,9 +138,9 @@ npm run test:capacity:external | tee external-profile-c.log
 
 Do not reuse the GitHub-hosted Profile A/B numbers as Profile C pass criteria. Establish the target environment's CPU, memory, connection, queue-age, and provider-rate ceilings before the run.
 
-## Paced soak example
+## Duration-bounded soak example
 
-The repository's documented 30-minute shape is 50 request starts/second for approximately 90,000 attempts:
+The documented 50 RPS / 30-minute shape no longer needs the operator to precompute an exact message count:
 
 ```bash
 EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV=true \
@@ -103,9 +148,13 @@ EXTERNAL_CAPACITY_PROFILE_NAME=soak-50rps-30m \
 EXTERNAL_CAPACITY_BASE_URL=https://capacity-api.example.test \
 EXTERNAL_CAPACITY_API_KEY="$CAPACITY_API_KEY" \
 EXTERNAL_CAPACITY_RECIPIENTS=+15550000001,+15550000002 \
-EXTERNAL_CAPACITY_MESSAGES=90000 \
+EXTERNAL_CAPACITY_DURATION_SECONDS=1800 \
+EXTERNAL_CAPACITY_MAX_MESSAGES=100000 \
 EXTERNAL_CAPACITY_CONCURRENCY=100 \
 EXTERNAL_CAPACITY_TARGET_RPS=50 \
+EXTERNAL_CAPACITY_MIN_START_RATE_RATIO=0.95 \
+EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING=5000 \
+EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS=120 \
 EXTERNAL_CAPACITY_ACCEPT_P95_MS=3000 \
 EXTERNAL_CAPACITY_ACCEPT_P99_MS=5000 \
 EXTERNAL_CAPACITY_MAX_ERROR_RATE=0.001 \
@@ -113,18 +162,22 @@ EXTERNAL_CAPACITY_DRAIN_MAX_MS=300000 \
 npm run test:capacity:external | tee external-soak-50rps-30m.log
 ```
 
-Longer runs can increase `EXTERNAL_CAPACITY_MESSAGES` up to 1,000,000 while keeping the intended pacing and concurrency ceiling. For multi-hour or repeated tests, rotate result files and collect infrastructure metrics outside this process.
+For multi-hour tests the duration can be increased up to six hours (`21600` seconds), while the explicit maximum-message ceiling remains mandatory protection against an unexpectedly large request budget.
 
 ## What is measured
 
 The runner records the synchronous HTTP acceptance phase separately from asynchronous drain:
 
+- configured execution mode and safety ceiling;
+- actual attempt count;
+- achieved start rate and start-rate ratio for duration runs;
 - accepted count and acceptance error rate;
 - HTTP status distribution and transport-error count;
 - accepted message-ID uniqueness without logging the IDs;
 - acceptance min, p50, p95, p99, and max latency;
 - acceptance and end-to-end throughput;
 - maximum observed tenant outbox pending, due, leased, and oldest-pending age;
+- configured optional outbox health ceilings;
 - final tenant message-status deltas;
 - snapshot sampling errors;
 - post-acceptance drain duration.
