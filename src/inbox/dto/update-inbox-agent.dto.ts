@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from "@nestjs/swagger";
-import { IsBoolean, IsEmail, IsInt, IsObject, IsOptional, IsString, Max, MaxLength, Min, MinLength } from "class-validator";
+import { IsBoolean, IsEmail, IsEnum, IsInt, IsObject, IsOptional, IsString, Max, MaxLength, Min, MinLength } from "class-validator";
+import { InboxAgentPresenceStatus } from "../../generated/prisma/client.js";
 
 export class UpdateInboxAgentDto {
   @ApiPropertyOptional()
@@ -26,6 +27,14 @@ export class UpdateInboxAgentDto {
   @IsOptional()
   @IsBoolean()
   active?: boolean;
+
+  @ApiPropertyOptional({
+    enum: InboxAgentPresenceStatus,
+    description: "Operational availability for new inbox conversation admission",
+  })
+  @IsOptional()
+  @IsEnum(InboxAgentPresenceStatus)
+  presenceStatus?: InboxAgentPresenceStatus;
 
   @ApiPropertyOptional({
     type: Number,
