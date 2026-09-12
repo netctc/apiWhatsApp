@@ -1,6 +1,10 @@
 import { jest } from "@jest/globals";
 import { BadRequestException } from "@nestjs/common";
-import { ConversationPriority, ConversationStatus } from "../src/generated/prisma/client.js";
+import {
+  ConversationPriority,
+  ConversationStatus,
+  InboxAgentPresenceStatus,
+} from "../src/generated/prisma/client.js";
 import { InboxService } from "../src/inbox/inbox.service.js";
 
 const principal = {
@@ -80,7 +84,7 @@ describe("InboxService", () => {
     expect(JSON.stringify(auditData?.data?.metadata)).not.toContain("vip-customers");
   });
 
-  it("validates an assigned agent inside the authenticated tenant and writes safe conversation audit metadata", async () => {
+  it("validates an available assigned agent inside the authenticated tenant and writes safe conversation audit metadata", async () => {
     const queryRaw = jest.fn().mockResolvedValue([]);
     const conversationFindFirst = jest.fn().mockResolvedValue({
       id: "44444444-4444-4444-8444-444444444444",
@@ -88,6 +92,8 @@ describe("InboxService", () => {
     });
     const inboxAgentFindFirst = jest.fn().mockResolvedValue({
       id: "33333333-3333-4333-8333-333333333333",
+      presenceStatus: InboxAgentPresenceStatus.AVAILABLE,
+      maxConcurrentConversations: null,
     });
     const conversationUpdate = jest.fn().mockResolvedValue({
       id: "44444444-4444-4444-8444-444444444444",
@@ -124,7 +130,7 @@ describe("InboxService", () => {
         tenantId: principal.tenantId,
         active: true,
       },
-      select: { id: true, maxConcurrentConversations: true },
+      select: { id: true, presenceStatus: true, maxConcurrentConversations: true },
     });
     expect(auditLogCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
