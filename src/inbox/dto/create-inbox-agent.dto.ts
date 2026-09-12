@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsEmail, IsInt, IsObject, IsOptional, IsString, Max, MaxLength, Min, MinLength } from "class-validator";
+import { IsEmail, IsEnum, IsInt, IsObject, IsOptional, IsString, Max, MaxLength, Min, MinLength } from "class-validator";
+import { InboxAgentPresenceStatus } from "../../generated/prisma/client.js";
 
 export class CreateInboxAgentDto {
   @ApiProperty({ example: "Support Agent" })
@@ -20,6 +21,14 @@ export class CreateInboxAgentDto {
   @IsEmail()
   @MaxLength(320)
   email?: string;
+
+  @ApiPropertyOptional({
+    enum: InboxAgentPresenceStatus,
+    description: "Operational availability for new inbox conversation admission",
+  })
+  @IsOptional()
+  @IsEnum(InboxAgentPresenceStatus)
+  presenceStatus?: InboxAgentPresenceStatus;
 
   @ApiPropertyOptional({
     type: Number,
