@@ -34,10 +34,14 @@ export class InboxTeamsService {
             tenantId: actor.tenantId,
             name,
             description,
+            ...(dto.responseSlaMinutes === undefined
+              ? {}
+              : { responseSlaMinutes: dto.responseSlaMinutes }),
           },
         });
         const audit = auditLogData(actor, context, "inbox.team.created", "InboxTeam", team.id, {
           hasDescription: description !== null,
+          responseSlaMinutes: team.responseSlaMinutes,
         });
         if (audit) {
           await transaction.auditLog.create({ data: audit });
@@ -135,11 +139,15 @@ export class InboxTeamsService {
             ? {}
             : { description: this.optionalText(dto.description) }),
           ...(dto.active === undefined ? {} : { active: dto.active }),
+          ...(dto.responseSlaMinutes === undefined
+            ? {}
+            : { responseSlaMinutes: dto.responseSlaMinutes }),
         };
         const team = await transaction.inboxTeam.update({ where: { id }, data });
         const audit = auditLogData(actor, context, "inbox.team.updated", "InboxTeam", id, {
           changedFields: changedFields(dto as Record<string, unknown>),
           active: team.active,
+          responseSlaMinutes: team.responseSlaMinutes,
         });
         if (audit) {
           await transaction.auditLog.create({ data: audit });
