@@ -19,9 +19,19 @@ on:
         default: profile-c
         type: string
       messages:
-        description: Total outbound message acceptance attempts
+        description: Fixed-mode outbound message acceptance attempts
         required: true
         default: "100000"
+        type: string
+      duration_seconds:
+        description: Soak duration in seconds; 0 keeps fixed-message mode
+        required: true
+        default: "0"
+        type: string
+      max_messages:
+        description: Hard safety ceiling for attempts in either mode
+        required: true
+        default: "1000000"
         type: string
       concurrency:
         description: Maximum concurrent HTTP acceptance requests
@@ -29,9 +39,24 @@ on:
         default: "500"
         type: string
       target_rps:
-        description: Optional request-start rate; 0 disables pacing
+        description: Request-start rate; required and positive for duration mode
         required: true
         default: "0"
+        type: string
+      min_start_rate_ratio:
+        description: Minimum achieved/requested start-rate ratio in duration mode
+        required: true
+        default: "0.95"
+        type: string
+      max_outbox_pending:
+        description: Optional maximum observed outbox pending count; blank disables
+        required: false
+        default: ""
+        type: string
+      max_outbox_oldest_age_seconds:
+        description: Optional maximum observed oldest pending age; blank disables
+        required: false
+        default: ""
         type: string
       accept_p95_ms:
         description: Maximum accepted-request p95 latency in milliseconds
@@ -84,8 +109,13 @@ jobs:
       EXTERNAL_CAPACITY_SENDER_ID: ${{ secrets.EXTERNAL_CAPACITY_SENDER_ID }}
       EXTERNAL_CAPACITY_PROFILE_NAME: ${{ inputs.profile_name }}
       EXTERNAL_CAPACITY_MESSAGES: ${{ inputs.messages }}
+      EXTERNAL_CAPACITY_DURATION_SECONDS: ${{ inputs.duration_seconds }}
+      EXTERNAL_CAPACITY_MAX_MESSAGES: ${{ inputs.max_messages }}
       EXTERNAL_CAPACITY_CONCURRENCY: ${{ inputs.concurrency }}
       EXTERNAL_CAPACITY_TARGET_RPS: ${{ inputs.target_rps }}
+      EXTERNAL_CAPACITY_MIN_START_RATE_RATIO: ${{ inputs.min_start_rate_ratio }}
+      EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING: ${{ inputs.max_outbox_pending }}
+      EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS: ${{ inputs.max_outbox_oldest_age_seconds }}
       EXTERNAL_CAPACITY_ACCEPT_P95_MS: ${{ inputs.accept_p95_ms }}
       EXTERNAL_CAPACITY_ACCEPT_P99_MS: ${{ inputs.accept_p99_ms }}
       EXTERNAL_CAPACITY_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
@@ -112,9 +142,16 @@ jobs:
           case "$EXTERNAL_CAPACITY_PROFILE_NAME" in
             *[!A-Za-z0-9._-]*|'') echo "Invalid profile_name" >&2; exit 1 ;;
           esac
-          case "$EXTERNAL_CAPACITY_MESSAGES:$EXTERNAL_CAPACITY_CONCURRENCY:$EXTERNAL_CAPACITY_TARGET_RPS:$EXTERNAL_CAPACITY_ACCEPT_P95_MS:$EXTERNAL_CAPACITY_ACCEPT_P99_MS:$EXTERNAL_CAPACITY_MAX_ERROR_RATE:$EXTERNAL_CAPACITY_DRAIN_MAX_MS:$EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS:$EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS" in
+          case "$EXTERNAL_CAPACITY_MESSAGES:$EXTERNAL_CAPACITY_DURATION_SECONDS:$EXTERNAL_CAPACITY_MAX_MESSAGES:$EXTERNAL_CAPACITY_CONCURRENCY:$EXTERNAL_CAPACITY_TARGET_RPS:$EXTERNAL_CAPACITY_MIN_START_RATE_RATIO:$EXTERNAL_CAPACITY_ACCEPT_P95_MS:$EXTERNAL_CAPACITY_ACCEPT_P99_MS:$EXTERNAL_CAPACITY_MAX_ERROR_RATE:$EXTERNAL_CAPACITY_DRAIN_MAX_MS:$EXTERNAL_CAPACITY_REQUEST_TIMEOUT_MS:$EXTERNAL_CAPACITY_SNAPSHOT_INTERVAL_MS" in
             *[!0-9.:]*|'') echo "Capacity inputs must be numeric" >&2; exit 1 ;;
           esac
+          for optional_value in "$EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING" "$EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS"; do
+            case "$optional_value" in
+              ''|*[!0-9]*)
+                test -z "$optional_value" || { echo "Optional queue gates must be non-negative integers" >&2; exit 1; }
+                ;;
+            esac
+          done
           test -n "$EXTERNAL_CAPACITY_BASE_URL" || { echo "EXTERNAL_CAPACITY_BASE_URL secret is required" >&2; exit 1; }
           test -n "$EXTERNAL_CAPACITY_API_KEY" || { echo "EXTERNAL_CAPACITY_API_KEY secret is required" >&2; exit 1; }
           test -n "$EXTERNAL_CAPACITY_RECIPIENTS" || { echo "EXTERNAL_CAPACITY_RECIPIENTS secret is required" >&2; exit 1; }
@@ -145,8 +182,13 @@ jobs:
           CAPACITY_ENVIRONMENT_NAME: ${{ inputs.environment_name }}
           CAPACITY_PROFILE_NAME: ${{ inputs.profile_name }}
           CAPACITY_MESSAGES: ${{ inputs.messages }}
+          CAPACITY_DURATION_SECONDS: ${{ inputs.duration_seconds }}
+          CAPACITY_MAX_MESSAGES: ${{ inputs.max_messages }}
           CAPACITY_CONCURRENCY: ${{ inputs.concurrency }}
           CAPACITY_TARGET_RPS: ${{ inputs.target_rps }}
+          CAPACITY_MIN_START_RATE_RATIO: ${{ inputs.min_start_rate_ratio }}
+          CAPACITY_MAX_OUTBOX_PENDING: ${{ inputs.max_outbox_pending }}
+          CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS: ${{ inputs.max_outbox_oldest_age_seconds }}
           CAPACITY_ACCEPT_P95_MS: ${{ inputs.accept_p95_ms }}
           CAPACITY_ACCEPT_P99_MS: ${{ inputs.accept_p99_ms }}
           CAPACITY_MAX_ERROR_RATE: ${{ inputs.max_error_rate }}
@@ -156,6 +198,7 @@ jobs:
           node <<'NODE'
           const fs = require("node:fs");
           const os = require("node:os");
+          const optionalNumber = (value) => value === "" || value === undefined ? null : Number(value);
           const metadata = {
             profile: process.env.CAPACITY_PROFILE_NAME,
             environmentClass: "external-deployed-isolated-test",
@@ -170,10 +213,17 @@ jobs:
             totalMemoryBytes: os.totalmem(),
             workload: {
               messages: Number(process.env.CAPACITY_MESSAGES),
+              durationSeconds: Number(process.env.CAPACITY_DURATION_SECONDS),
+              maxMessages: Number(process.env.CAPACITY_MAX_MESSAGES),
               concurrency: Number(process.env.CAPACITY_CONCURRENCY),
               targetRps: Number(process.env.CAPACITY_TARGET_RPS),
             },
             gates: {
+              minStartRateRatio: Number(process.env.CAPACITY_MIN_START_RATE_RATIO),
+              maxOutboxPending: optionalNumber(process.env.CAPACITY_MAX_OUTBOX_PENDING),
+              maxOutboxOldestAgeSeconds: optionalNumber(
+                process.env.CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS,
+              ),
               acceptP95Ms: Number(process.env.CAPACITY_ACCEPT_P95_MS),
               acceptP99Ms: Number(process.env.CAPACITY_ACCEPT_P99_MS),
               maxErrorRate: Number(process.env.CAPACITY_MAX_ERROR_RATE),
