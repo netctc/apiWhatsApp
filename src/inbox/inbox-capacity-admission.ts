@@ -1,8 +1,13 @@
 import { UnprocessableEntityException } from "@nestjs/common";
-import { ConversationStatus, Prisma } from "../generated/prisma/client.js";
+import {
+  ConversationStatus,
+  InboxAgentPresenceStatus,
+  Prisma,
+} from "../generated/prisma/client.js";
 
 export type LockedAgentCapacity = {
   agentId: string;
+  presenceStatus: InboxAgentPresenceStatus;
   maxConcurrentConversations: number | null;
 };
 
@@ -22,7 +27,7 @@ export async function lockActiveAgentCapacity(
 
   const agent = await transaction.inboxAgent.findFirst({
     where: { id: agentId, tenantId, active: true },
-    select: { id: true, maxConcurrentConversations: true },
+    select: { id: true, presenceStatus: true, maxConcurrentConversations: true },
   });
   if (!agent) {
     throw new UnprocessableEntityException(inactiveMessage);
@@ -30,8 +35,18 @@ export async function lockActiveAgentCapacity(
 
   return {
     agentId: agent.id,
+    presenceStatus: agent.presenceStatus,
     maxConcurrentConversations: agent.maxConcurrentConversations ?? null,
   };
+}
+
+export function assertAgentAvailableForConversation(
+  agent: LockedAgentCapacity,
+  presenceMessage: string,
+): void {
+  if (agent.presenceStatus !== InboxAgentPresenceStatus.AVAILABLE) {
+    throw new UnprocessableEntityException(presenceMessage);
+  }
 }
 
 export async function assertAgentHasConversationCapacity(

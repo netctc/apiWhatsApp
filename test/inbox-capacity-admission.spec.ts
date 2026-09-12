@@ -1,7 +1,11 @@
 import { jest } from "@jest/globals";
 import { UnprocessableEntityException } from "@nestjs/common";
-import { ConversationStatus } from "../src/generated/prisma/client.js";
 import {
+  ConversationStatus,
+  InboxAgentPresenceStatus,
+} from "../src/generated/prisma/client.js";
+import {
+  assertAgentAvailableForConversation,
   assertAgentHasConversationCapacity,
   lockActiveAgentCapacity,
 } from "../src/inbox/inbox-capacity-admission.js";
@@ -9,13 +13,19 @@ import {
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
 const AGENT_ID = "22222222-2222-4222-8222-222222222222";
 
-function setup(options: { active?: boolean; limit?: number | null; load?: number } = {}) {
+function setup(options: {
+  active?: boolean;
+  presenceStatus?: InboxAgentPresenceStatus;
+  limit?: number | null;
+  load?: number;
+} = {}) {
   const queryRaw = jest.fn().mockResolvedValue([{ id: AGENT_ID }]);
   const inboxAgentFindFirst = jest.fn().mockResolvedValue(
     options.active === false
       ? null
       : {
           id: AGENT_ID,
+          presenceStatus: options.presenceStatus ?? InboxAgentPresenceStatus.AVAILABLE,
           maxConcurrentConversations: options.limit === undefined ? null : options.limit,
         },
   );
@@ -28,8 +38,17 @@ function setup(options: { active?: boolean; limit?: number | null; load?: number
   return { tx, queryRaw, inboxAgentFindFirst, conversationCount };
 }
 
-describe("inbox capacity admission", () => {
-  it("locks the tenant agent row and returns its active capacity policy", async () => {
+const lockedAgent = (
+  maxConcurrentConversations: number | null,
+  presenceStatus = InboxAgentPresenceStatus.AVAILABLE,
+) => ({
+  agentId: AGENT_ID,
+  presenceStatus,
+  maxConcurrentConversations,
+});
+
+describe("inbox capacity and presence admission", () => {
+  it("locks the tenant agent row and returns its active admission policy", async () => {
     const { tx, queryRaw, inboxAgentFindFirst } = setup({ limit: 4 });
 
     const agent = await lockActiveAgentCapacity(
@@ -42,9 +61,13 @@ describe("inbox capacity admission", () => {
     expect(queryRaw).toHaveBeenCalledTimes(1);
     expect(inboxAgentFindFirst).toHaveBeenCalledWith({
       where: { id: AGENT_ID, tenantId: TENANT_ID, active: true },
-      select: { id: true, maxConcurrentConversations: true },
+      select: { id: true, presenceStatus: true, maxConcurrentConversations: true },
     });
-    expect(agent).toEqual({ agentId: AGENT_ID, maxConcurrentConversations: 4 });
+    expect(agent).toEqual({
+      agentId: AGENT_ID,
+      presenceStatus: InboxAgentPresenceStatus.AVAILABLE,
+      maxConcurrentConversations: 4,
+    });
   });
 
   it("rejects a missing or inactive tenant agent after taking the admission lock", async () => {
@@ -54,13 +77,30 @@ describe("inbox capacity admission", () => {
       .rejects.toBeInstanceOf(UnprocessableEntityException);
   });
 
+  it("admits AVAILABLE agents and rejects AWAY or OFFLINE agents for new work", () => {
+    expect(() => assertAgentAvailableForConversation(
+      lockedAgent(null, InboxAgentPresenceStatus.AVAILABLE),
+      "unavailable",
+    )).not.toThrow();
+
+    expect(() => assertAgentAvailableForConversation(
+      lockedAgent(null, InboxAgentPresenceStatus.AWAY),
+      "unavailable",
+    )).toThrow("unavailable");
+
+    expect(() => assertAgentAvailableForConversation(
+      lockedAgent(null, InboxAgentPresenceStatus.OFFLINE),
+      "unavailable",
+    )).toThrow(UnprocessableEntityException);
+  });
+
   it("treats null capacity as unlimited without counting workload", async () => {
     const { tx, conversationCount } = setup();
 
     await expect(assertAgentHasConversationCapacity(
       tx as never,
       TENANT_ID,
-      { agentId: AGENT_ID, maxConcurrentConversations: null },
+      lockedAgent(null),
       "full",
     )).resolves.toBeNull();
 
@@ -73,7 +113,7 @@ describe("inbox capacity admission", () => {
     await expect(assertAgentHasConversationCapacity(
       tx as never,
       TENANT_ID,
-      { agentId: AGENT_ID, maxConcurrentConversations: 3 },
+      lockedAgent(3),
       "full",
     )).resolves.toBe(2);
 
@@ -91,7 +131,7 @@ describe("inbox capacity admission", () => {
     await expect(assertAgentHasConversationCapacity(
       zero.tx as never,
       TENANT_ID,
-      { agentId: AGENT_ID, maxConcurrentConversations: 0 },
+      lockedAgent(0),
       "full",
     )).rejects.toBeInstanceOf(UnprocessableEntityException);
 
@@ -99,7 +139,7 @@ describe("inbox capacity admission", () => {
     await expect(assertAgentHasConversationCapacity(
       bounded.tx as never,
       TENANT_ID,
-      { agentId: AGENT_ID, maxConcurrentConversations: 2 },
+      lockedAgent(2),
       "full",
     )).rejects.toThrow("full");
   });

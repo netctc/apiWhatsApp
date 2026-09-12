@@ -297,7 +297,7 @@ describe("inbox conversation skill routing integration", () => {
     expect(audit.metadata).toMatchObject({ requiredSkills: 2, eligibleAgents: 1 });
   });
 
-  it("rejects automatic routing when no active team member satisfies all requirements", async () => {
+  it("rejects automatic routing when no available team member satisfies all requirements", async () => {
     const targetId = await createConversation();
     await putRequirement(targetId, skillB, 5).expect(200);
 
@@ -306,7 +306,7 @@ describe("inbox conversation skill routing integration", () => {
       .set("X-API-Key", writerKey)
       .expect(422);
 
-    expect(response.body.message).toBe("Assigned inbox team has no active members satisfying required skills");
+    expect(response.body.message).toBe("Assigned inbox team has no available members satisfying required skills");
     expect((await prisma.conversation.findUniqueOrThrow({ where: { id: targetId } })).assignedAgentId).toBeNull();
   });
 

@@ -1,6 +1,10 @@
 import { jest } from "@jest/globals";
 import { ConflictException, NotFoundException, UnprocessableEntityException } from "@nestjs/common";
-import { ConversationPriority, ConversationStatus } from "../src/generated/prisma/client.js";
+import {
+  ConversationPriority,
+  ConversationStatus,
+  InboxAgentPresenceStatus,
+} from "../src/generated/prisma/client.js";
 import { InboxService } from "../src/inbox/inbox.service.js";
 
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
@@ -24,13 +28,20 @@ const baseConversation = {
   unreadCount: 2,
 };
 
-function setup(assignedAgentId: string | null = null) {
+function setup(
+  assignedAgentId: string | null = null,
+  presenceStatus = InboxAgentPresenceStatus.AVAILABLE,
+) {
   const existing = { ...baseConversation, assignedAgentId };
   const queryRaw = jest.fn().mockResolvedValue([]);
   const conversationFindFirst = jest.fn().mockResolvedValue(existing);
   const conversationFindFirstOrThrow = jest.fn().mockResolvedValue(existing);
   const conversationUpdate = jest.fn().mockResolvedValue({ ...existing, assignedAgentId: AGENT_A });
-  const inboxAgentFindFirst = jest.fn().mockResolvedValue({ id: AGENT_A });
+  const inboxAgentFindFirst = jest.fn().mockResolvedValue({
+    id: AGENT_A,
+    presenceStatus,
+    maxConcurrentConversations: null,
+  });
   const auditLogCreate = jest.fn().mockResolvedValue({});
   const tx = {
     $queryRaw: queryRaw,
@@ -58,7 +69,7 @@ function setup(assignedAgentId: string | null = null) {
 }
 
 describe("InboxService conversation claim and release", () => {
-  it("claims an unassigned conversation for an active tenant agent and audits only structural state", async () => {
+  it("claims an unassigned conversation for an available active tenant agent and audits only structural state", async () => {
     const { service, queryRaw, conversationUpdate, inboxAgentFindFirst, auditLogCreate } = setup();
 
     const result = await service.claimConversation(principal, CONVERSATION_ID, AGENT_A, {
@@ -69,7 +80,7 @@ describe("InboxService conversation claim and release", () => {
     expect(queryRaw).toHaveBeenCalledTimes(3);
     expect(inboxAgentFindFirst).toHaveBeenCalledWith({
       where: { id: AGENT_A, tenantId: TENANT_ID, active: true },
-      select: { id: true, maxConcurrentConversations: true },
+      select: { id: true, presenceStatus: true, maxConcurrentConversations: true },
     });
     expect(conversationUpdate).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: CONVERSATION_ID },
@@ -90,8 +101,11 @@ describe("InboxService conversation claim and release", () => {
     expect(JSON.stringify(auditLogCreate.mock.calls[0]?.[0])).not.toContain(AGENT_A);
   });
 
-  it("treats a repeat claim by the same active agent as an idempotent no-op", async () => {
-    const { service, conversationFindFirstOrThrow, conversationUpdate, auditLogCreate } = setup(AGENT_A);
+  it("treats a repeat claim by the same holder as an idempotent no-op while AWAY", async () => {
+    const { service, conversationFindFirstOrThrow, conversationUpdate, auditLogCreate } = setup(
+      AGENT_A,
+      InboxAgentPresenceStatus.AWAY,
+    );
 
     const result = await service.claimConversation(principal, CONVERSATION_ID, AGENT_A);
 
@@ -102,6 +116,18 @@ describe("InboxService conversation claim and release", () => {
     }));
     expect(conversationUpdate).not.toHaveBeenCalled();
     expect(auditLogCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a new claim by an AWAY or OFFLINE agent", async () => {
+    const away = setup(null, InboxAgentPresenceStatus.AWAY);
+    await expect(away.service.claimConversation(principal, CONVERSATION_ID, AGENT_A))
+      .rejects.toThrow("Inbox agent is not available for new conversations");
+    expect(away.conversationUpdate).not.toHaveBeenCalled();
+
+    const offline = setup(null, InboxAgentPresenceStatus.OFFLINE);
+    await expect(offline.service.claimConversation(principal, CONVERSATION_ID, AGENT_A))
+      .rejects.toBeInstanceOf(UnprocessableEntityException);
+    expect(offline.conversationUpdate).not.toHaveBeenCalled();
   });
 
   it("returns conflict when another agent already holds the conversation", async () => {
