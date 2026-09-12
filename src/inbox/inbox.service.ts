@@ -18,6 +18,11 @@ import { ListInboxAgentsQueryDto } from "./dto/list-inbox-agents-query.dto.js";
 import { UpdateConversationDto } from "./dto/update-conversation.dto.js";
 import { UpdateInboxAgentDto } from "./dto/update-inbox-agent.dto.js";
 import {
+  assertAgentHasConversationCapacity,
+  lockActiveAgentCapacity,
+  type LockedAgentCapacity,
+} from "./inbox-capacity-admission.js";
+import {
   assertAgentMeetsConversationSkills,
   filterAgentsByConversationSkills,
 } from "./inbox-skill-admission.js";
@@ -49,6 +54,7 @@ const conversationSummaryInclude = {
       name: true,
       email: true,
       active: true,
+      maxConcurrentConversations: true,
     },
   },
   teamAssignment: {
@@ -102,6 +108,9 @@ export class InboxService {
             name,
             externalId,
             email,
+            ...(dto.maxConcurrentConversations === undefined
+              ? {}
+              : { maxConcurrentConversations: dto.maxConcurrentConversations }),
             ...(dto.metadata ? { metadata: this.toJson(dto.metadata) } : {}),
           },
         });
@@ -159,6 +168,9 @@ export class InboxService {
           ...(dto.externalId === undefined ? {} : { externalId: this.requiredText(dto.externalId, "External ID") }),
           ...(dto.email === undefined ? {} : { email: this.requiredText(dto.email, "Email").toLowerCase() }),
           ...(dto.active === undefined ? {} : { active: dto.active }),
+          ...(dto.maxConcurrentConversations === undefined
+            ? {}
+            : { maxConcurrentConversations: dto.maxConcurrentConversations }),
           ...(dto.metadata === undefined ? {} : { metadata: this.toJson(dto.metadata) }),
         };
 
@@ -318,14 +330,14 @@ export class InboxService {
         throw new NotFoundException("Conversation not found");
       }
 
+      let assignedAgentCapacity: LockedAgentCapacity | null = null;
       if (dto.assignedAgentId) {
-        const agent = await transaction.inboxAgent.findFirst({
-          where: { id: dto.assignedAgentId, tenantId: actor.tenantId, active: true },
-          select: { id: true },
-        });
-        if (!agent) {
-          throw new UnprocessableEntityException("Assigned inbox agent is not active in this tenant");
-        }
+        assignedAgentCapacity = await lockActiveAgentCapacity(
+          transaction,
+          actor.tenantId,
+          dto.assignedAgentId,
+          "Assigned inbox agent is not active in this tenant",
+        );
       }
 
       if (dto.assignedTeamId) {
@@ -345,6 +357,9 @@ export class InboxService {
       const finalTeamId = dto.assignedTeamId === undefined
         ? existing.teamAssignment?.teamId ?? null
         : dto.assignedTeamId;
+      const newAgentAdmission = dto.assignedAgentId !== undefined
+        && finalAgentId !== null
+        && finalAgentId !== existing.assignedAgentId;
       if (assignmentChanged && finalAgentId && finalTeamId) {
         await this.assertAgentTeamMembership(
           transaction,
@@ -361,6 +376,14 @@ export class InboxService {
           id,
           finalAgentId,
           "Assigned inbox agent does not satisfy conversation skill requirements",
+        );
+      }
+      if (newAgentAdmission && assignedAgentCapacity) {
+        await assertAgentHasConversationCapacity(
+          transaction,
+          actor.tenantId,
+          assignedAgentCapacity,
+          "Assigned inbox agent has no remaining conversation capacity",
         );
       }
 
@@ -432,13 +455,12 @@ export class InboxService {
         throw new NotFoundException("Conversation not found");
       }
 
-      const agent = await transaction.inboxAgent.findFirst({
-        where: { id: agentId, tenantId: actor.tenantId, active: true },
-        select: { id: true },
-      });
-      if (!agent) {
-        throw new UnprocessableEntityException("Inbox agent is not active in this tenant");
-      }
+      const agentCapacity = await lockActiveAgentCapacity(
+        transaction,
+        actor.tenantId,
+        agentId,
+        "Inbox agent is not active in this tenant",
+      );
 
       if (existing.assignedAgentId === agentId) {
         const conversation = await transaction.conversation.findFirstOrThrow({
@@ -467,6 +489,12 @@ export class InboxService {
         id,
         agentId,
         "Inbox agent does not satisfy conversation skill requirements",
+      );
+      await assertAgentHasConversationCapacity(
+        transaction,
+        actor.tenantId,
+        agentCapacity,
+        "Inbox agent has no remaining conversation capacity",
       );
 
       const conversation = await transaction.conversation.update({
@@ -531,8 +559,11 @@ export class InboxService {
         throw new UnprocessableEntityException("Assigned inbox team is not active in this tenant");
       }
 
-      const candidates = await transaction.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
-        SELECT membership."agentId"
+      const candidates = await transaction.$queryRaw<Array<{
+        agentId: string;
+        maxConcurrentConversations: number | null;
+      }>>(Prisma.sql`
+        SELECT membership."agentId", agent."maxConcurrentConversations"
         FROM "InboxTeamMember" AS membership
         INNER JOIN "InboxAgent" AS agent
           ON agent."id" = membership."agentId"
@@ -541,7 +572,7 @@ export class InboxService {
           AND membership."teamId" = ${teamId}::uuid
           AND agent."active" = TRUE
         ORDER BY membership."agentId" ASC
-        FOR SHARE OF membership, agent
+        FOR UPDATE OF membership, agent
       `);
       if (candidates.length === 0) {
         throw new UnprocessableEntityException("Assigned inbox team has no active routing members");
@@ -576,9 +607,22 @@ export class InboxService {
         }
       }
 
-      let selectedAgentId = candidateIds[0];
+      const capacityByAgent = new Map(
+        candidates.map((candidate) => [candidate.agentId, candidate.maxConcurrentConversations ?? null]),
+      );
+      const capacityEligibleIds = candidateIds.filter((candidateId) => {
+        const limit = capacityByAgent.get(candidateId) ?? null;
+        return limit === null || (loadByAgent.get(candidateId) ?? 0) < limit;
+      });
+      if (capacityEligibleIds.length === 0) {
+        throw new UnprocessableEntityException(
+          "Assigned inbox team has no routing members with remaining conversation capacity",
+        );
+      }
+
+      let selectedAgentId = capacityEligibleIds[0];
       let selectedLoad = loadByAgent.get(selectedAgentId) ?? 0;
-      for (const candidateId of candidateIds.slice(1)) {
+      for (const candidateId of capacityEligibleIds.slice(1)) {
         const load = loadByAgent.get(candidateId) ?? 0;
         if (load < selectedLoad) {
           selectedAgentId = candidateId;
@@ -593,7 +637,8 @@ export class InboxService {
       });
       const audit = auditLogData(actor, context, "inbox.conversation.routed", "Conversation", id, {
         strategy: "least_open_pending",
-        eligibleAgents: candidateIds.length,
+        eligibleAgents: capacityEligibleIds.length,
+        capacityLimitedAgents: candidateIds.length - capacityEligibleIds.length,
         requiredSkills: skillEligible.requiredSkills,
         selectedLoad,
         assigned: true,
