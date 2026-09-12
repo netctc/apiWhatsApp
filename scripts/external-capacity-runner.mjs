@@ -495,6 +495,7 @@ async function main() {
   const report = {
     profileName,
     environmentClass: "external-isolated-test",
+    total: durationSeconds > 0 ? attempted : total,
     mode: durationSeconds > 0 ? "duration" : "fixed-count",
     configuredMessages: total,
     durationSeconds,
