@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsEmail, IsObject, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
+import { IsEmail, IsInt, IsObject, IsOptional, IsString, Max, MaxLength, Min, MinLength } from "class-validator";
 
 export class CreateInboxAgentDto {
   @ApiProperty({ example: "Support Agent" })
@@ -20,6 +20,19 @@ export class CreateInboxAgentDto {
   @IsEmail()
   @MaxLength(320)
   email?: string;
+
+  @ApiPropertyOptional({
+    type: Number,
+    nullable: true,
+    minimum: 0,
+    maximum: 10000,
+    description: "Maximum OPEN/PENDING conversations accepted by this agent; null means unlimited",
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  maxConcurrentConversations?: number | null;
 
   @ApiPropertyOptional({ description: "Provider-neutral operational metadata" })
   @IsOptional()

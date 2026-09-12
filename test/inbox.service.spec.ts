@@ -124,7 +124,7 @@ describe("InboxService", () => {
         tenantId: principal.tenantId,
         active: true,
       },
-      select: { id: true },
+      select: { id: true, maxConcurrentConversations: true },
     });
     expect(auditLogCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({

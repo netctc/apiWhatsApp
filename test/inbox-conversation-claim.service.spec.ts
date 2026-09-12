@@ -66,10 +66,10 @@ describe("InboxService conversation claim and release", () => {
       userAgent: "claim-test",
     });
 
-    expect(queryRaw).toHaveBeenCalledTimes(2);
+    expect(queryRaw).toHaveBeenCalledTimes(3);
     expect(inboxAgentFindFirst).toHaveBeenCalledWith({
       where: { id: AGENT_A, tenantId: TENANT_ID, active: true },
-      select: { id: true },
+      select: { id: true, maxConcurrentConversations: true },
     });
     expect(conversationUpdate).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: CONVERSATION_ID },
