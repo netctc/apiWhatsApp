@@ -17,6 +17,10 @@ import { ListConversationsQueryDto } from "./dto/list-conversations-query.dto.js
 import { ListInboxAgentsQueryDto } from "./dto/list-inbox-agents-query.dto.js";
 import { UpdateConversationDto } from "./dto/update-conversation.dto.js";
 import { UpdateInboxAgentDto } from "./dto/update-inbox-agent.dto.js";
+import {
+  assertAgentMeetsConversationSkills,
+  filterAgentsByConversationSkills,
+} from "./inbox-skill-admission.js";
 
 const conversationSummaryInclude = {
   contact: {
@@ -229,6 +233,19 @@ export class InboxService {
       where: { id, tenantId },
       include: {
         ...conversationSummaryInclude,
+        skillRequirements: {
+          orderBy: [{ skill: { name: "asc" } }, { skillId: "asc" }],
+          include: {
+            skill: {
+              select: {
+                id: true,
+                name: true,
+                description: true,
+                active: true,
+              },
+            },
+          },
+        },
         notes: {
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 100,
@@ -322,22 +339,29 @@ export class InboxService {
       }
 
       const assignmentChanged = dto.assignedAgentId !== undefined || dto.assignedTeamId !== undefined;
-      if (assignmentChanged) {
-        const finalAgentId = dto.assignedAgentId === undefined
-          ? existing.assignedAgentId
-          : dto.assignedAgentId;
-        const finalTeamId = dto.assignedTeamId === undefined
-          ? existing.teamAssignment?.teamId ?? null
-          : dto.assignedTeamId;
-        if (finalAgentId && finalTeamId) {
-          await this.assertAgentTeamMembership(
-            transaction,
-            actor.tenantId,
-            finalTeamId,
-            finalAgentId,
-            "Assigned inbox agent is not a member of the assigned team",
-          );
-        }
+      const finalAgentId = dto.assignedAgentId === undefined
+        ? existing.assignedAgentId
+        : dto.assignedAgentId;
+      const finalTeamId = dto.assignedTeamId === undefined
+        ? existing.teamAssignment?.teamId ?? null
+        : dto.assignedTeamId;
+      if (assignmentChanged && finalAgentId && finalTeamId) {
+        await this.assertAgentTeamMembership(
+          transaction,
+          actor.tenantId,
+          finalTeamId,
+          finalAgentId,
+          "Assigned inbox agent is not a member of the assigned team",
+        );
+      }
+      if (dto.assignedAgentId !== undefined && finalAgentId) {
+        await assertAgentMeetsConversationSkills(
+          transaction,
+          actor.tenantId,
+          id,
+          finalAgentId,
+          "Assigned inbox agent does not satisfy conversation skill requirements",
+        );
       }
 
       if (dto.assignedTeamId !== undefined) {
@@ -437,6 +461,13 @@ export class InboxService {
           "Inbox agent is not a member of the assigned team",
         );
       }
+      await assertAgentMeetsConversationSkills(
+        transaction,
+        actor.tenantId,
+        id,
+        agentId,
+        "Inbox agent does not satisfy conversation skill requirements",
+      );
 
       const conversation = await transaction.conversation.update({
         where: { id },
@@ -516,7 +547,19 @@ export class InboxService {
         throw new UnprocessableEntityException("Assigned inbox team has no active routing members");
       }
 
-      const candidateIds = candidates.map((candidate) => candidate.agentId);
+      const skillEligible = await filterAgentsByConversationSkills(
+        transaction,
+        actor.tenantId,
+        id,
+        candidates.map((candidate) => candidate.agentId),
+      );
+      const candidateIds = skillEligible.agentIds;
+      if (candidateIds.length === 0) {
+        throw new UnprocessableEntityException(
+          "Assigned inbox team has no active members satisfying required skills",
+        );
+      }
+
       const groupedLoads = await transaction.conversation.groupBy({
         by: ["assignedAgentId"],
         where: {
@@ -551,6 +594,7 @@ export class InboxService {
       const audit = auditLogData(actor, context, "inbox.conversation.routed", "Conversation", id, {
         strategy: "least_open_pending",
         eligibleAgents: candidateIds.length,
+        requiredSkills: skillEligible.requiredSkills,
         selectedLoad,
         assigned: true,
       });
