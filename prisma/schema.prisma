@@ -423,6 +423,7 @@ model Conversation {
   responseSlaStartedAt    DateTime?
   responseSlaDueAt        DateTime?
   responseSlaRespondedAt  DateTime?
+  responseSlaEscalatedAt  DateTime?
   createdAt               DateTime                       @default(now())
   updatedAt               DateTime                       @updatedAt
   tenant                  Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -440,6 +441,7 @@ model Conversation {
   @@index([tenantId, assignedAgentId, status, lastMessageAt])
   @@index([tenantId, priority, lastMessageAt])
   @@index([tenantId, status, responseSlaDueAt])
+  @@index([status, responseSlaDueAt, responseSlaEscalatedAt])
   @@index([contactId, lastMessageAt])
 }
 
