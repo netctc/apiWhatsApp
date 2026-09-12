@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { createMonotonicStartGate } from "./external-capacity-scheduler.mjs";
 
 const SUCCESS_STATUSES = ["SUBMITTED", "SENT", "DELIVERED", "READ"];
 const IN_FLIGHT_STATUSES = ["CREATED", "QUEUED", "PROCESSING"];
@@ -31,6 +32,18 @@ function readInteger(name, fallback, min, max) {
 function readNumber(name, fallback, min, max) {
   const raw = process.env[name]?.trim();
   const value = raw ? Number(raw) : fallback;
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} must be a number between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function readOptionalNumber(name, min, max) {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return null;
+  }
+  const value = Number(raw);
   if (!Number.isFinite(value) || value < min || value > max) {
     throw new Error(`${name} must be a number between ${min} and ${max}`);
   }
@@ -174,46 +187,67 @@ function assertCleanBaseline(snapshot) {
   }
 }
 
-async function runBoundedLoad({ total, concurrency, targetRatePerSecond }, task) {
-  const results = new Array(total);
-  const scheduleStartedAt = performance.now();
+async function runLoad(
+  { total, maxMessages, concurrency, targetRatePerSecond, durationSeconds },
+  task,
+) {
+  const results = [];
+  const durationMode = durationSeconds > 0;
+  const deadlineAtMs = durationMode ? performance.now() + durationSeconds * 1000 : null;
+  const attemptLimit = durationMode ? maxMessages : total;
+  const waitForStart =
+    targetRatePerSecond > 0
+      ? createMonotonicStartGate({ targetRatePerSecond, deadlineAtMs })
+      : null;
   let nextIndex = 0;
 
   async function worker() {
     for (;;) {
       const index = nextIndex;
       nextIndex += 1;
-      if (index >= total) {
+      if (index >= attemptLimit) {
         return;
       }
 
-      if (targetRatePerSecond > 0) {
-        const scheduledAt = scheduleStartedAt + (index * 1000) / targetRatePerSecond;
-        const waitMs = scheduledAt - performance.now();
-        if (waitMs > 0) {
-          await sleep(waitMs);
+      if (durationMode && performance.now() >= deadlineAtMs) {
+        return;
+      }
+
+      if (waitForStart) {
+        const startedSlot = await waitForStart();
+        if (startedSlot === null) {
+          return;
         }
+      }
+
+      if (durationMode && performance.now() >= deadlineAtMs) {
+        return;
       }
 
       const startedAt = performance.now();
       try {
         const value = await task(index);
-        results[index] = {
+        results.push({
+          index,
+          startedAt,
           durationMs: performance.now() - startedAt,
           ...value,
-        };
+        });
       } catch {
-        results[index] = {
+        results.push({
+          index,
+          startedAt,
           durationMs: performance.now() - startedAt,
           status: 0,
           messageId: undefined,
           transportError: true,
-        };
+        });
       }
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+  await Promise.all(Array.from({ length: Math.min(concurrency, attemptLimit) }, () => worker()));
+  results.sort((left, right) => left.index - right.index);
   return results;
 }
 
@@ -225,8 +259,18 @@ async function main() {
   const recipients = parseRecipients();
   const profileName = parseRunLabel();
   const total = readInteger("EXTERNAL_CAPACITY_MESSAGES", 100_000, 1, 1_000_000);
-  const concurrency = readInteger("EXTERNAL_CAPACITY_CONCURRENCY", 500, 1, total);
+  const durationSeconds = readInteger("EXTERNAL_CAPACITY_DURATION_SECONDS", 0, 0, 21_600);
+  const maxMessages = readInteger("EXTERNAL_CAPACITY_MAX_MESSAGES", 1_000_000, 1, 1_000_000);
+  const attemptLimit = durationSeconds > 0 ? maxMessages : total;
+  const concurrency = readInteger("EXTERNAL_CAPACITY_CONCURRENCY", 500, 1, attemptLimit);
   const targetRatePerSecond = readNumber("EXTERNAL_CAPACITY_TARGET_RPS", 0, 0, 10_000);
+  const minStartRateRatio = readNumber("EXTERNAL_CAPACITY_MIN_START_RATE_RATIO", 0.95, 0, 1);
+  const maxOutboxPending = readOptionalNumber("EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING", 0, 1_000_000_000);
+  const maxOldestPendingAgeSeconds = readOptionalNumber(
+    "EXTERNAL_CAPACITY_MAX_OLDEST_PENDING_AGE_SECONDS",
+    0,
+    86_400,
+  );
   const maxP95Ms = readNumber("EXTERNAL_CAPACITY_ACCEPT_P95_MS", 3000, 1, 60_000);
   const maxP99Ms = readNumber("EXTERNAL_CAPACITY_ACCEPT_P99_MS", 5000, 1, 60_000);
   const maxErrorRate = readNumber("EXTERNAL_CAPACITY_MAX_ERROR_RATE", 0, 0, 1);
@@ -249,6 +293,20 @@ async function main() {
     120_000,
   );
   const senderId = process.env.EXTERNAL_CAPACITY_SENDER_ID?.trim() || undefined;
+
+  if (durationSeconds > 0 && targetRatePerSecond <= 0) {
+    throw new Error("EXTERNAL_CAPACITY_TARGET_RPS must be greater than zero in duration mode");
+  }
+  if (durationSeconds > 0) {
+    const minimumRequiredStarts = Math.ceil(
+      durationSeconds * targetRatePerSecond * minStartRateRatio,
+    );
+    if (maxMessages < minimumRequiredStarts) {
+      throw new Error(
+        `EXTERNAL_CAPACITY_MAX_MESSAGES must be at least ${minimumRequiredStarts} to satisfy EXTERNAL_CAPACITY_MIN_START_RATE_RATIO`,
+      );
+    }
+  }
 
   const messagesUrl = new URL("/api/v1/messages", baseUrl);
   const snapshotUrl = new URL("/api/v1/operations/snapshot", baseUrl);
@@ -287,8 +345,8 @@ async function main() {
 
   const runToken = `${Date.now()}-${randomUUID().slice(0, 8)}`;
   const acceptanceStartedAt = performance.now();
-  const attempts = await runBoundedLoad(
-    { total, concurrency, targetRatePerSecond },
+  const attempts = await runLoad(
+    { total, maxMessages, concurrency, targetRatePerSecond, durationSeconds },
     async (index) => {
       const requestBody = {
         to: recipients[index % recipients.length],
@@ -323,11 +381,12 @@ async function main() {
 
   stopMonitoring = true;
 
+  const attempted = attempts.length;
   const accepted = attempts.filter(
     (attempt) => attempt.status === 202 && typeof attempt.messageId === "string",
   );
   const uniqueMessageIds = new Set(accepted.map((attempt) => attempt.messageId));
-  const errorRate = (total - accepted.length) / total;
+  const errorRate = attempted > 0 ? (attempted - accepted.length) / attempted : 1;
   const latency = summarizeDurations(attempts.map((attempt) => attempt.durationMs));
   const httpStatusCounts = {};
   let transportErrors = 0;
@@ -338,6 +397,13 @@ async function main() {
     }
     httpStatusCounts[String(attempt.status)] = (httpStatusCounts[String(attempt.status)] ?? 0) + 1;
   }
+
+  const expectedDurationStarts =
+    durationSeconds > 0 ? durationSeconds * targetRatePerSecond : null;
+  const achievedStartRateRatio =
+    expectedDurationStarts && expectedDurationStarts > 0
+      ? attempted / expectedDurationStarts
+      : null;
 
   const baselineTotal = Number(baseline.messages?.total ?? 0);
   const baselineSuccessful = countStatuses(baseline, SUCCESS_STATUSES);
@@ -402,18 +468,37 @@ async function main() {
     p99: latency.p99 <= maxP99Ms,
     drain: drainCompleted,
     isolatedTenant: !contaminationDetected && totalDelta === accepted.length,
+    ...(durationSeconds > 0
+      ? { startRate: achievedStartRateRatio >= minStartRateRatio }
+      : {}),
+    ...(maxOutboxPending !== null
+      ? { outboxPending: operations.maxOutboxPending <= maxOutboxPending }
+      : {}),
+    ...(maxOldestPendingAgeSeconds !== null
+      ? {
+          outboxOldestAge:
+            operations.maxOldestPendingAgeSeconds <= maxOldestPendingAgeSeconds,
+        }
+      : {}),
   };
   const passed = Object.values(gates).every(Boolean);
 
   const report = {
     profileName,
     environmentClass: "external-isolated-test",
-    total,
+    mode: durationSeconds > 0 ? "duration" : "fixed-count",
+    configuredMessages: total,
+    durationSeconds,
+    maxMessages,
+    attempted,
     concurrency,
     targetRatePerSecond,
+    minStartRateRatio: durationSeconds > 0 ? minStartRateRatio : null,
+    achievedStartRateRatio:
+      achievedStartRateRatio === null ? null : Number(achievedStartRateRatio.toFixed(4)),
     recipientCount: recipients.length,
     accepted: accepted.length,
-    errors: total - accepted.length,
+    errors: attempted - accepted.length,
     errorRate,
     duplicateAcceptedIds: accepted.length - uniqueMessageIds.size,
     transportErrors,
@@ -438,6 +523,8 @@ async function main() {
       maxOutboxDue: operations.maxOutboxDue,
       maxOutboxLeased: operations.maxOutboxLeased,
       maxOldestPendingAgeSeconds: operations.maxOldestPendingAgeSeconds,
+      configuredMaxOutboxPending: maxOutboxPending,
+      configuredMaxOldestPendingAgeSeconds: maxOldestPendingAgeSeconds,
       finalOutboxPending: Number(finalSnapshot.outbox?.pending ?? 0),
       finalOldestPendingAgeSeconds: Number(finalSnapshot.outbox?.oldestPendingAgeSeconds ?? 0),
     },
