@@ -350,6 +350,7 @@ model InboxTeam {
   name                    String                       @db.VarChar(120)
   description             String?                      @db.VarChar(500)
   active                  Boolean                      @default(true)
+  responseSlaMinutes      Int?
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt
   tenant                  Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -407,34 +408,38 @@ model InboxAgentSkill {
 }
 
 model Conversation {
-  id                String                         @id @default(uuid()) @db.Uuid
-  tenantId          String                         @db.Uuid
-  contactId         String                         @db.Uuid
-  senderId          String                         @db.Uuid
-  assignedAgentId   String?                        @db.Uuid
-  status            ConversationStatus             @default(OPEN)
-  priority          ConversationPriority           @default(NORMAL)
-  unreadCount       Int                            @default(0)
-  lastMessageAt     DateTime
-  lastInboundAt     DateTime?
-  lastOutboundAt    DateTime?
-  resolvedAt        DateTime?
-  createdAt         DateTime                       @default(now())
-  updatedAt         DateTime                       @updatedAt
-  tenant            Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  contact           Contact                        @relation(fields: [contactId], references: [id], onDelete: Restrict)
-  sender            WhatsAppPhoneNumber            @relation(fields: [senderId], references: [id], onDelete: Restrict)
-  assignedAgent     InboxAgent?                    @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
-  teamAssignment    ConversationTeamAssignment?
-  skillRequirements ConversationSkillRequirement[]
-  messages          Message[]
-  notes             ConversationNote[]
+  id                      String                         @id @default(uuid()) @db.Uuid
+  tenantId                String                         @db.Uuid
+  contactId               String                         @db.Uuid
+  senderId                String                         @db.Uuid
+  assignedAgentId         String?                        @db.Uuid
+  status                  ConversationStatus             @default(OPEN)
+  priority                ConversationPriority           @default(NORMAL)
+  unreadCount             Int                            @default(0)
+  lastMessageAt           DateTime
+  lastInboundAt           DateTime?
+  lastOutboundAt          DateTime?
+  resolvedAt              DateTime?
+  responseSlaStartedAt    DateTime?
+  responseSlaDueAt        DateTime?
+  responseSlaRespondedAt  DateTime?
+  createdAt               DateTime                       @default(now())
+  updatedAt               DateTime                       @updatedAt
+  tenant                  Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact                 Contact                        @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  sender                  WhatsAppPhoneNumber            @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  assignedAgent           InboxAgent?                    @relation(fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  teamAssignment          ConversationTeamAssignment?
+  skillRequirements       ConversationSkillRequirement[]
+  messages                Message[]
+  notes                   ConversationNote[]
 
   @@unique([tenantId, senderId, contactId])
   @@unique([tenantId, id])
   @@index([tenantId, status, lastMessageAt])
   @@index([tenantId, assignedAgentId, status, lastMessageAt])
   @@index([tenantId, priority, lastMessageAt])
+  @@index([tenantId, status, responseSlaDueAt])
   @@index([contactId, lastMessageAt])
 }
 
