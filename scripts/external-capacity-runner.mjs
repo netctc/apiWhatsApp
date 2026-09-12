@@ -38,14 +38,14 @@ function readNumber(name, fallback, min, max) {
   return value;
 }
 
-function readOptionalNumber(name, min, max) {
+function readOptionalInteger(name, min, max) {
   const raw = process.env[name]?.trim();
   if (!raw) {
     return null;
   }
   const value = Number(raw);
-  if (!Number.isFinite(value) || value < min || value > max) {
-    throw new Error(`${name} must be a number between ${min} and ${max}`);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
   }
   return value;
 }
@@ -265,9 +265,13 @@ async function main() {
   const concurrency = readInteger("EXTERNAL_CAPACITY_CONCURRENCY", 500, 1, attemptLimit);
   const targetRatePerSecond = readNumber("EXTERNAL_CAPACITY_TARGET_RPS", 0, 0, 10_000);
   const minStartRateRatio = readNumber("EXTERNAL_CAPACITY_MIN_START_RATE_RATIO", 0.95, 0, 1);
-  const maxOutboxPending = readOptionalNumber("EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING", 0, 1_000_000_000);
-  const maxOldestPendingAgeSeconds = readOptionalNumber(
-    "EXTERNAL_CAPACITY_MAX_OLDEST_PENDING_AGE_SECONDS",
+  const maxOutboxPending = readOptionalInteger(
+    "EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING",
+    0,
+    1_000_000_000,
+  );
+  const maxOutboxOldestAgeSeconds = readOptionalInteger(
+    "EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS",
     0,
     86_400,
   );
@@ -294,6 +298,9 @@ async function main() {
   );
   const senderId = process.env.EXTERNAL_CAPACITY_SENDER_ID?.trim() || undefined;
 
+  if (durationSeconds === 0 && total > maxMessages) {
+    throw new Error("EXTERNAL_CAPACITY_MESSAGES must not exceed EXTERNAL_CAPACITY_MAX_MESSAGES");
+  }
   if (durationSeconds > 0 && targetRatePerSecond <= 0) {
     throw new Error("EXTERNAL_CAPACITY_TARGET_RPS must be greater than zero in duration mode");
   }
@@ -400,6 +407,8 @@ async function main() {
 
   const expectedDurationStarts =
     durationSeconds > 0 ? durationSeconds * targetRatePerSecond : null;
+  const achievedStartRatePerSecond =
+    durationSeconds > 0 ? attempted / durationSeconds : null;
   const achievedStartRateRatio =
     expectedDurationStarts && expectedDurationStarts > 0
       ? attempted / expectedDurationStarts
@@ -474,10 +483,10 @@ async function main() {
     ...(maxOutboxPending !== null
       ? { outboxPending: operations.maxOutboxPending <= maxOutboxPending }
       : {}),
-    ...(maxOldestPendingAgeSeconds !== null
+    ...(maxOutboxOldestAgeSeconds !== null
       ? {
           outboxOldestAge:
-            operations.maxOldestPendingAgeSeconds <= maxOldestPendingAgeSeconds,
+            operations.maxOldestPendingAgeSeconds <= maxOutboxOldestAgeSeconds,
         }
       : {}),
   };
@@ -494,6 +503,10 @@ async function main() {
     concurrency,
     targetRatePerSecond,
     minStartRateRatio: durationSeconds > 0 ? minStartRateRatio : null,
+    achievedStartRatePerSecond:
+      achievedStartRatePerSecond === null
+        ? null
+        : Number(achievedStartRatePerSecond.toFixed(2)),
     achievedStartRateRatio:
       achievedStartRateRatio === null ? null : Number(achievedStartRateRatio.toFixed(4)),
     recipientCount: recipients.length,
@@ -524,7 +537,7 @@ async function main() {
       maxOutboxLeased: operations.maxOutboxLeased,
       maxOldestPendingAgeSeconds: operations.maxOldestPendingAgeSeconds,
       configuredMaxOutboxPending: maxOutboxPending,
-      configuredMaxOldestPendingAgeSeconds: maxOldestPendingAgeSeconds,
+      configuredMaxOutboxOldestAgeSeconds: maxOutboxOldestAgeSeconds,
       finalOutboxPending: Number(finalSnapshot.outbox?.pending ?? 0),
       finalOldestPendingAgeSeconds: Number(finalSnapshot.outbox?.oldestPendingAgeSeconds ?? 0),
     },
