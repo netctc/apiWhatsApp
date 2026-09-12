@@ -1,6 +1,6 @@
 # External capacity GitHub workflow
 
-The `External Capacity Profile` workflow runs the standalone HTTP capacity generator against an already deployed, isolated test environment. It is intended for Profile C and paced soak runs that are too long or too environment-specific for the repository-local Jest capacity harness.
+The `External Capacity Profile` workflow runs the standalone HTTP capacity generator against an already deployed, isolated test environment. It supports both the historical fixed-message Profile C contract and duration-bounded paced soak runs that are too long or too environment-specific for the repository-local Jest capacity harness.
 
 The workflow does not deploy the API and does not connect directly to PostgreSQL, Redis, or RabbitMQ. It only calls the public application endpoints used by `scripts/external-capacity-runner.mjs`.
 
@@ -11,7 +11,8 @@ The workflow is manual (`workflow_dispatch`) and requires all of the following b
 1. a GitHub Environment name, normally `capacity-test`;
 2. `confirm_isolated_test_env=true` selected explicitly for the run;
 3. the required Environment secrets described below;
-4. a tenant that starts with no pending outbox work and no messages in `CREATED`, `QUEUED`, or `PROCESSING`.
+4. a tenant that starts with no pending outbox work and no messages in `CREATED`, `QUEUED`, or `PROCESSING`;
+5. a hard `max_messages` ceiling for the selected workload.
 
 The workflow serializes runs by GitHub Environment name with `cancel-in-progress: false`. Two capacity runs therefore cannot intentionally execute at the same time against the same named environment through this workflow.
 
@@ -37,7 +38,7 @@ Requirements:
 
 The workflow never writes these values into its metadata artifact. GitHub masks secret values in runner logs, and the external capacity report deliberately excludes them.
 
-## Profile C
+## Fixed-message Profile C
 
 Run **Actions → External Capacity Profile → Run workflow** with approximately:
 
@@ -46,8 +47,13 @@ environment_name=capacity-test
 confirm_isolated_test_env=true
 profile_name=profile-c
 messages=100000
+duration_seconds=0
+max_messages=100000
 concurrency=500
 target_rps=0
+min_start_rate_ratio=0.95
+max_outbox_pending=
+max_outbox_oldest_age_seconds=
 accept_p95_ms=3000
 accept_p99_ms=5000
 max_error_rate=0
@@ -56,21 +62,26 @@ request_timeout_ms=10000
 snapshot_interval_ms=5000
 ```
 
+With `duration_seconds=0`, the `messages` input keeps its historical meaning. `max_messages` must be at least `messages`; otherwise the runner rejects the configuration before contacting the target.
+
 These latency values are starting engineering gates, not production SLOs. Replace them with the approved target-environment objectives once production-like SLOs have been agreed.
 
-The workflow job allows up to six hours so the load generator itself does not recreate the 20-minute GitHub/Jest boundary that motivated the external runner. The target deployment should remain independently observable throughout the run.
+## Duration-bounded paced soak
 
-## Paced soak example
-
-For the documented 50 RPS / roughly 30-minute shape:
+For the documented 50 RPS / 30-minute shape:
 
 ```text
 environment_name=capacity-test
 confirm_isolated_test_env=true
 profile_name=soak-50rps-30m
-messages=90000
+messages=100000             # ignored as the workload count while duration mode is active
+duration_seconds=1800
+max_messages=100000
 concurrency=100
 target_rps=50
+min_start_rate_ratio=0.95
+max_outbox_pending=5000
+max_outbox_oldest_age_seconds=120
 accept_p95_ms=3000
 accept_p99_ms=5000
 max_error_rate=0.001
@@ -79,7 +90,11 @@ request_timeout_ms=10000
 snapshot_interval_ms=5000
 ```
 
-Longer soak tests can increase message count up to the external runner limit of 1,000,000 attempts, provided the six-hour GitHub job ceiling and the target environment's approved test window are respected. For tests beyond that window, execute `npm run test:capacity:external` from a dedicated long-lived load-generator host instead.
+Duration mode requires a positive `target_rps`. New requests stop being scheduled at the duration deadline, already-started requests may finish, and missed pacing slots are not recovered as a burst. The runner fails when the achieved start-rate ratio falls below `min_start_rate_ratio`.
+
+`max_outbox_pending` and `max_outbox_oldest_age_seconds` are optional. Leave either blank to disable that specific queue-health gate.
+
+The workflow job allows up to six hours, matching the external runner duration ceiling. For tests beyond the GitHub job window, execute `npm run test:capacity:external` from a dedicated long-lived load-generator host.
 
 ## Artifacts
 
@@ -97,7 +112,7 @@ external-capacity.json
 external-capacity-environment.json
 ```
 
-`external-capacity.json` is produced only when the runner reaches its bounded report output. `external-capacity-environment.json` records non-secret execution metadata such as commit SHA, run ID, runner characteristics, workload shape, and configured gates.
+`external-capacity.json` is produced only when the runner reaches its bounded report output. `external-capacity-environment.json` records non-secret execution metadata such as commit SHA, run ID, runner characteristics, workload shape, duration, maximum-message ceiling, requested RPS, start-rate gate, optional queue-health gates, and configured latency/error/drain gates.
 
 The final workflow step fails the job when the external capacity runner exits non-zero, after artifact upload has had a chance to preserve the evidence.
 
