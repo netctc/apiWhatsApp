@@ -1,6 +1,9 @@
 import { jest } from "@jest/globals";
 import { UnprocessableEntityException } from "@nestjs/common";
-import { ConversationStatus } from "../src/generated/prisma/client.js";
+import {
+  ConversationStatus,
+  InboxAgentPresenceStatus,
+} from "../src/generated/prisma/client.js";
 import { InboxService } from "../src/inbox/inbox.service.js";
 
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
@@ -45,7 +48,11 @@ function setup(options: {
     priority: "NORMAL",
     teamAssignment: assignedTeamId ? { teamId: assignedTeamId } : null,
   }));
-  const agentFindFirst = jest.fn().mockResolvedValue({ id: AGENT_A });
+  const agentFindFirst = jest.fn().mockImplementation(({ where }: { where: { id: string } }) => ({
+    id: where.id,
+    presenceStatus: InboxAgentPresenceStatus.AVAILABLE,
+    maxConcurrentConversations: null,
+  }));
   const teamFindFirst = jest.fn().mockResolvedValue({ id: TEAM_A });
   const membershipFindFirst = jest.fn().mockResolvedValue(options.member === false ? null : { teamId: TEAM_A });
   const assignmentUpsert = jest.fn().mockResolvedValue({});
