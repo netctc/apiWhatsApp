@@ -1,0 +1,5 @@
+CREATE TYPE "InboxAgentPresenceStatus" AS ENUM ('AVAILABLE', 'AWAY', 'OFFLINE');
+
+ALTER TABLE "InboxAgent"
+ADD COLUMN "presenceStatus" "InboxAgentPresenceStatus" NOT NULL DEFAULT 'AVAILABLE',
+ADD COLUMN "presenceUpdatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
