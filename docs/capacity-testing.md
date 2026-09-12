@@ -199,28 +199,33 @@ CAPACITY_DRAIN_MAX_MS=600000 \
 npm run test:capacity
 ```
 
-`CAPACITY_MESSAGES` is hard-capped at 100,000 by the harness. Larger/longer tests should use repeated isolated runs or a separate external load generator so a single Jest process does not become the limiting factor.
+`CAPACITY_MESSAGES` is hard-capped at 100,000 by the repository-local harness. Larger production-like Profile C runs should use the external runner, where `EXTERNAL_CAPACITY_MAX_MESSAGES` provides a separate explicit safety ceiling.
 
-### Soak-style paced run
+### Duration-bounded soak run
 
-Purpose: find memory growth, connection leaks, queue-age drift, retries, and sustained downstream bottlenecks.
+Purpose: find memory growth, connection leaks, queue-age drift, retries, sustained downstream bottlenecks, and load-generator saturation.
 
-Example: 50 requests/second for approximately 30 minutes:
-
-```text
-50 RPS * 1800 seconds = 90000 attempts
-```
+Short local soak-style runs can still use `CAPACITY_MESSAGES` plus `CAPACITY_TARGET_RPS`, but long certification-oriented runs should use the external duration mode against a deployed isolated environment:
 
 ```bash
-CAPACITY_MESSAGES=90000 \
-CAPACITY_CONCURRENCY=100 \
-CAPACITY_TARGET_RPS=50 \
-CAPACITY_MAX_ERROR_RATE=0.001 \
-CAPACITY_DRAIN_MAX_MS=300000 \
-npm run test:capacity
+EXTERNAL_CAPACITY_CONFIRM_ISOLATED_TEST_ENV=true \
+EXTERNAL_CAPACITY_DURATION_SECONDS=1800 \
+EXTERNAL_CAPACITY_MAX_MESSAGES=100000 \
+EXTERNAL_CAPACITY_CONCURRENCY=100 \
+EXTERNAL_CAPACITY_TARGET_RPS=50 \
+EXTERNAL_CAPACITY_MIN_START_RATE_RATIO=0.95 \
+EXTERNAL_CAPACITY_MAX_OUTBOX_PENDING=5000 \
+EXTERNAL_CAPACITY_MAX_OUTBOX_OLDEST_AGE_SECONDS=120 \
+EXTERNAL_CAPACITY_MAX_ERROR_RATE=0.001 \
+EXTERNAL_CAPACITY_DRAIN_MAX_MS=300000 \
+npm run test:capacity:external
 ```
 
-For longer soak periods, prefer an external load generator against a deployed production-like stack. The in-repository harness intentionally caps a single run at 100,000 attempts.
+The external runner stops scheduling at the wall-clock deadline, never catches up missed start slots with a recovery burst, and reports the achieved/requested start-rate ratio. This makes runner saturation visible instead of disguising it as target-system capacity.
+
+Duration mode is capped at six hours and one million attempts. `EXTERNAL_CAPACITY_MAX_MESSAGES` is a hard preflight ceiling in both fixed and duration modes. Optional outbox pending and oldest-age gates make sustained backlog growth an explicit failure condition instead of merely evidence to inspect later.
+
+See `docs/external-capacity-runner.md` and `docs/external-capacity-workflow.md` for the deployed-run contract and manual GitHub workflow.
 
 ## How to choose thresholds
 
@@ -233,6 +238,7 @@ At minimum define:
 - maximum queue/outbox oldest-age during the run;
 - maximum post-burst drain time;
 - target provider submissions/second;
+- minimum achieved request-start rate for paced soak tests;
 - CPU/memory saturation ceiling per API and worker replica;
 - PostgreSQL connection, lock, CPU, and IO ceilings;
 - RabbitMQ queue depth/age and publish-confirm latency ceilings;
