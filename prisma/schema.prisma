@@ -88,6 +88,12 @@ enum ConversationPriority {
   URGENT
 }
 
+enum InboxAgentPresenceStatus {
+  AVAILABLE
+  AWAY
+  OFFLINE
+}
+
 model Tenant {
   id                String                @id @default(uuid()) @db.Uuid
   name              String
@@ -316,17 +322,19 @@ model CampaignRecipient {
 }
 
 model InboxAgent {
-  id                         String            @id @default(uuid()) @db.Uuid
-  tenantId                   String            @db.Uuid
+  id                         String                   @id @default(uuid()) @db.Uuid
+  tenantId                   String                   @db.Uuid
   externalId                 String?
   name                       String
   email                      String?
-  active                     Boolean           @default(true)
+  active                     Boolean                  @default(true)
+  presenceStatus             InboxAgentPresenceStatus @default(AVAILABLE)
+  presenceUpdatedAt          DateTime                 @default(now())
   maxConcurrentConversations Int?
   metadata                   Json?
-  createdAt                  DateTime          @default(now())
-  updatedAt                  DateTime          @updatedAt
-  tenant                     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime                 @default(now())
+  updatedAt                  DateTime                 @updatedAt
+  tenant                     Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations              Conversation[]
   teamMemberships            InboxTeamMember[]
   skillAssignments           InboxAgentSkill[]
