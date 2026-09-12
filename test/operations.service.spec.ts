@@ -61,6 +61,14 @@ describe("OperationsService", () => {
           retainedBytes: 245760,
           expiringWithin24Hours: 3,
         },
+      ])
+      .mockResolvedValueOnce([
+        {
+          waitingForResponse: 5,
+          overdueUnescalated: 2,
+          escalatedUnresolved: 1,
+          oldestOverdueAgeSeconds: 120,
+        },
       ]);
   });
 
@@ -83,7 +91,7 @@ describe("OperationsService", () => {
     expect(recipientGroupBy).toHaveBeenCalledWith(
       expect.objectContaining({ where: { campaign: { tenantId: TENANT_ID } } }),
     );
-    expect(queryRaw).toHaveBeenCalledTimes(2);
+    expect(queryRaw).toHaveBeenCalledTimes(3);
 
     expect(snapshot.messages.total).toBe(10);
     expect(snapshot.messages.byStatus.QUEUED).toBe(4);
@@ -109,6 +117,12 @@ describe("OperationsService", () => {
       retainedBinaries: 5,
       retainedBytes: 245760,
       expiringWithin24Hours: 3,
+    });
+    expect(snapshot.inboxResponseSla).toEqual({
+      waitingForResponse: 5,
+      overdueUnescalated: 2,
+      escalatedUnresolved: 1,
+      oldestOverdueAgeSeconds: 120,
     });
     expect(Number.isNaN(Date.parse(snapshot.generatedAt))).toBe(false);
   });

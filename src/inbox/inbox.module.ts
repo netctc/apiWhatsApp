@@ -7,6 +7,7 @@ import { InboxConversationSkillsController } from "./inbox-conversation-skills.c
 import { InboxConversationSkillsService } from "./inbox-conversation-skills.service.js";
 import { InboxController } from "./inbox.controller.js";
 import { InboxService } from "./inbox.service.js";
+import { InboxResponseSlaEscalationService } from "./inbox-response-sla-escalation.service.js";
 import { InboxSkillsController } from "./inbox-skills.controller.js";
 import { InboxSkillsService } from "./inbox-skills.service.js";
 import { InboxTeamsController } from "./inbox-teams.controller.js";
@@ -24,6 +25,7 @@ import { InboxTeamsService } from "./inbox-teams.service.js";
   providers: [
     InboxService,
     ConversationActivityService,
+    InboxResponseSlaEscalationService,
     ConversationNotesService,
     InboxTeamsService,
     InboxSkillsService,
@@ -32,6 +34,7 @@ import { InboxTeamsService } from "./inbox-teams.service.js";
   exports: [
     InboxService,
     ConversationActivityService,
+    InboxResponseSlaEscalationService,
     InboxTeamsService,
     InboxSkillsService,
     InboxConversationSkillsService,

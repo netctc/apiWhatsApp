@@ -58,6 +58,7 @@ describe("inbox response SLA contract", () => {
     expect(sql).toContain('"responseSlaStartedAt"');
     expect(sql).toContain('"responseSlaDueAt"');
     expect(sql).toContain('"responseSlaRespondedAt"');
+    expect(sql).toContain('"responseSlaEscalatedAt"');
     expect(sql).toContain('"ConversationTeamAssignment"');
     expect(sql).toContain('"responseSlaMinutes"');
     expect(sql).toContain("EXCLUDED.\"lastInboundAt\" > COALESCE");
@@ -87,6 +88,7 @@ describe("inbox response SLA contract", () => {
 
     const sql = renderSql(queryRaw.mock.calls[0]?.[0]);
     expect(sql).toContain('"responseSlaRespondedAt"');
+    expect(sql).toContain('"responseSlaEscalatedAt"');
     expect(sql).toContain("EXCLUDED.\"lastOutboundAt\" >= \"Conversation\".\"responseSlaStartedAt\"");
     expect(sql).toContain("WHEN \"Conversation\".\"status\" = 'RESOLVED'");
   });

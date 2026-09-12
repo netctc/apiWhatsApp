@@ -27,6 +27,13 @@ interface MediaAssetOperationsRow {
   expiringWithin24Hours: number;
 }
 
+interface InboxResponseSlaOperationsRow {
+  waitingForResponse: number;
+  overdueUnescalated: number;
+  escalatedUnresolved: number;
+  oldestOverdueAgeSeconds: number | null;
+}
+
 export interface OperationsSnapshot {
   messages: {
     total: number;
@@ -54,6 +61,12 @@ export interface OperationsSnapshot {
     retainedBytes: number;
     expiringWithin24Hours: number;
   };
+  inboxResponseSla: {
+    waitingForResponse: number;
+    overdueUnescalated: number;
+    escalatedUnresolved: number;
+    oldestOverdueAgeSeconds: number | null;
+  };
   generatedAt: string;
 }
 
@@ -69,6 +82,7 @@ export class OperationsService {
       recipientRows,
       outboxRows,
       mediaAssetRows,
+      inboxResponseSlaRows,
     ] = await Promise.all([
       this.prisma.message.groupBy({
         by: ["status"],
@@ -142,6 +156,35 @@ export class OperationsService {
         FROM "MediaAsset" AS a
         WHERE a."tenantId" = ${tenantId}::uuid
       `),
+      this.prisma.$queryRaw<InboxResponseSlaOperationsRow[]>(Prisma.sql`
+        SELECT
+          COUNT(*) FILTER (
+            WHERE c."status" IN ('OPEN'::"ConversationStatus", 'PENDING'::"ConversationStatus")
+              AND c."responseSlaStartedAt" IS NOT NULL
+              AND c."responseSlaDueAt" IS NOT NULL
+              AND c."responseSlaRespondedAt" IS NULL
+          )::int AS "waitingForResponse",
+          COUNT(*) FILTER (
+            WHERE c."status" IN ('OPEN'::"ConversationStatus", 'PENDING'::"ConversationStatus")
+              AND c."responseSlaDueAt" <= NOW()
+              AND c."responseSlaRespondedAt" IS NULL
+              AND c."responseSlaEscalatedAt" IS NULL
+          )::int AS "overdueUnescalated",
+          COUNT(*) FILTER (
+            WHERE c."status" IN ('OPEN'::"ConversationStatus", 'PENDING'::"ConversationStatus")
+              AND c."responseSlaRespondedAt" IS NULL
+              AND c."responseSlaEscalatedAt" IS NOT NULL
+          )::int AS "escalatedUnresolved",
+          EXTRACT(EPOCH FROM (
+            NOW() - MIN(c."responseSlaDueAt") FILTER (
+              WHERE c."status" IN ('OPEN'::"ConversationStatus", 'PENDING'::"ConversationStatus")
+                AND c."responseSlaDueAt" <= NOW()
+                AND c."responseSlaRespondedAt" IS NULL
+            )
+          ))::int AS "oldestOverdueAgeSeconds"
+        FROM "Conversation" AS c
+        WHERE c."tenantId" = ${tenantId}::uuid
+      `),
     ]);
 
     const messagesByStatus = this.zeroedRecord(MessageStatus);
@@ -181,6 +224,13 @@ export class OperationsService {
       expiringWithin24Hours: 0,
     };
 
+    const inboxResponseSla = inboxResponseSlaRows[0] ?? {
+      waitingForResponse: 0,
+      overdueUnescalated: 0,
+      escalatedUnresolved: 0,
+      oldestOverdueAgeSeconds: null,
+    };
+
     return {
       messages: {
         total: this.total(messagesByStatus),
@@ -194,6 +244,7 @@ export class OperationsService {
       },
       outbox,
       mediaAssets,
+      inboxResponseSla,
       generatedAt: new Date().toISOString(),
     };
   }

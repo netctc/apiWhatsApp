@@ -94,6 +94,10 @@ export class ConversationActivityService {
           WHEN ${startsResponseSlaCycle} THEN NULL
           ELSE "Conversation"."responseSlaRespondedAt"
         END,
+        "responseSlaEscalatedAt" = CASE
+          WHEN ${startsResponseSlaCycle} THEN NULL
+          ELSE "Conversation"."responseSlaEscalatedAt"
+        END,
         "updatedAt" = CURRENT_TIMESTAMP
       RETURNING "id"
     `);
@@ -182,6 +186,10 @@ export class ConversationActivityService {
           WHEN "Conversation"."status" = 'RESOLVED'::"ConversationStatus" THEN NULL
           WHEN ${closesResponseSlaCycle} THEN EXCLUDED."lastOutboundAt"
           ELSE "Conversation"."responseSlaRespondedAt"
+        END,
+        "responseSlaEscalatedAt" = CASE
+          WHEN "Conversation"."status" = 'RESOLVED'::"ConversationStatus" THEN NULL
+          ELSE "Conversation"."responseSlaEscalatedAt"
         END,
         "updatedAt" = CURRENT_TIMESTAMP
       RETURNING "id"
