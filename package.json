@@ -21,6 +21,7 @@
     "test:integration": "npm run build && node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config jest.integration.config.cjs --runInBand --forceExit",
     "test:capacity": "npm run build && node --experimental-vm-modules ./node_modules/jest/bin/jest.js --config jest.integration.config.cjs test/integration/capacity-profile.integration.ts --runInBand --forceExit",
     "test:capacity:external": "node scripts/external-capacity-runner.mjs",
+    "certify:production": "node scripts/production-certification.mjs",
     "audit:prod": "node scripts/audit-production.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",

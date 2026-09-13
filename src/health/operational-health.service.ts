@@ -7,6 +7,7 @@ import {
   type MediaBinaryStorageDiagnostics,
 } from "../media/media-binary-storage.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
+import { APP_VERSION } from "../version.js";
 
 export type DependencyHealthStatus = "up" | "down";
 export type DependencyHealthError = "not_configured" | "timeout" | "unavailable";
@@ -53,8 +54,11 @@ export class OperationalHealthService implements OnModuleDestroy {
   }
 
   live() {
+    const revision = this.appRevision();
     return {
       status: "ok" as const,
+      version: APP_VERSION,
+      ...(revision ? { revision } : {}),
       uptimeSeconds: Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
     };
@@ -225,6 +229,11 @@ export class OperationalHealthService implements OnModuleDestroy {
         },
       );
     });
+  }
+
+  private appRevision(): string | undefined {
+    const value = process.env.APP_REVISION?.trim();
+    return value && /^[A-Za-z0-9._-]{1,64}$/.test(value) ? value : undefined;
   }
 
   private timeoutMs(): number {

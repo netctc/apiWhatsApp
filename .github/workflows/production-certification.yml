@@ -1,0 +1,213 @@
+name: Production Readiness Certification
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: GitHub Environment containing production-like certification secrets
+        required: true
+        default: certification-test
+        type: string
+      confirm_production_like_env:
+        description: Confirm the target is production-like and safe for read-only certification
+        required: true
+        default: false
+        type: boolean
+      expected_version:
+        description: Exact semantic version; blank uses package.json version
+        required: false
+        default: ""
+        type: string
+      expected_revision:
+        description: Optional exact deployment revision
+        required: false
+        default: ""
+        type: string
+      require_https:
+        description: Require HTTPS for the deployed target
+        required: true
+        default: true
+        type: boolean
+      max_ready_ms:
+        description: Maximum /health/ready latency in milliseconds
+        required: true
+        default: "3000"
+        type: string
+      max_outbox_pending:
+        description: Maximum tenant outbox pending count
+        required: true
+        default: "0"
+        type: string
+      max_outbox_due:
+        description: Maximum tenant outbox due count
+        required: true
+        default: "0"
+        type: string
+      max_outbox_with_errors:
+        description: Maximum tenant outbox pending rows carrying errors
+        required: true
+        default: "0"
+        type: string
+      max_outbox_oldest_age_seconds:
+        description: Maximum oldest pending outbox age in seconds
+        required: true
+        default: "60"
+        type: string
+      max_inbox_overdue_unescalated:
+        description: Optional maximum overdue un-escalated inbox SLA count; blank disables
+        required: false
+        default: ""
+        type: string
+      max_inbox_escalated_unresolved:
+        description: Optional maximum escalated unresolved inbox SLA count; blank disables
+        required: false
+        default: ""
+        type: string
+      request_timeout_ms:
+        description: Timeout for each certification HTTP request
+        required: true
+        default: "5000"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-readiness-certification-${{ inputs.environment_name }}
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment_name }}
+    env:
+      CERTIFICATION_CONFIRM_PRODUCTION_LIKE_ENV: ${{ inputs.confirm_production_like_env }}
+      CERTIFICATION_BASE_URL: ${{ secrets.CERTIFICATION_BASE_URL }}
+      CERTIFICATION_API_KEY: ${{ secrets.CERTIFICATION_API_KEY }}
+      CERTIFICATION_EXPECTED_VERSION: ${{ inputs.expected_version }}
+      CERTIFICATION_EXPECTED_REVISION: ${{ inputs.expected_revision }}
+      CERTIFICATION_REQUIRE_HTTPS: ${{ inputs.require_https }}
+      CERTIFICATION_MAX_READY_MS: ${{ inputs.max_ready_ms }}
+      CERTIFICATION_MAX_OUTBOX_PENDING: ${{ inputs.max_outbox_pending }}
+      CERTIFICATION_MAX_OUTBOX_DUE: ${{ inputs.max_outbox_due }}
+      CERTIFICATION_MAX_OUTBOX_WITH_ERRORS: ${{ inputs.max_outbox_with_errors }}
+      CERTIFICATION_MAX_OUTBOX_OLDEST_AGE_SECONDS: ${{ inputs.max_outbox_oldest_age_seconds }}
+      CERTIFICATION_MAX_INBOX_OVERDUE_UNESCALATED: ${{ inputs.max_inbox_overdue_unescalated }}
+      CERTIFICATION_MAX_INBOX_ESCALATED_UNRESOLVED: ${{ inputs.max_inbox_escalated_unresolved }}
+      CERTIFICATION_REQUEST_TIMEOUT_MS: ${{ inputs.request_timeout_ms }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate certification configuration
+        shell: bash
+        run: |
+          test "$CERTIFICATION_CONFIRM_PRODUCTION_LIKE_ENV" = "true" || {
+            echo "confirm_production_like_env must be explicitly enabled" >&2
+            exit 1
+          }
+          test -n "$CERTIFICATION_BASE_URL" || { echo "CERTIFICATION_BASE_URL secret is required" >&2; exit 1; }
+          test -n "$CERTIFICATION_API_KEY" || { echo "CERTIFICATION_API_KEY secret is required" >&2; exit 1; }
+          case "$CERTIFICATION_MAX_READY_MS:$CERTIFICATION_MAX_OUTBOX_PENDING:$CERTIFICATION_MAX_OUTBOX_DUE:$CERTIFICATION_MAX_OUTBOX_WITH_ERRORS:$CERTIFICATION_MAX_OUTBOX_OLDEST_AGE_SECONDS:$CERTIFICATION_REQUEST_TIMEOUT_MS" in
+            *[!0-9:]*|'') echo "Certification thresholds must be non-negative integers" >&2; exit 1 ;;
+          esac
+          for optional_value in "$CERTIFICATION_MAX_INBOX_OVERDUE_UNESCALATED" "$CERTIFICATION_MAX_INBOX_ESCALATED_UNRESOLVED"; do
+            case "$optional_value" in
+              ''|*[!0-9]*)
+                test -z "$optional_value" || { echo "Optional inbox gates must be non-negative integers" >&2; exit 1; }
+                ;;
+            esac
+          done
+
+      - name: Run production readiness certification
+        id: certification
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          mkdir -p production-certification-artifacts
+          npm run certify:production 2>&1 | tee production-certification-artifacts/runner.log
+          runner_status=${PIPESTATUS[0]}
+          grep '^\[production-certification\] {' production-certification-artifacts/runner.log \
+            | tail -n 1 \
+            | sed 's/^\[production-certification\] //' \
+            > production-certification-artifacts/certification.json
+          if [ -s production-certification-artifacts/certification.json ]; then
+            node -e 'JSON.parse(require("node:fs").readFileSync("production-certification-artifacts/certification.json", "utf8"))'
+          else
+            node -e 'require("node:fs").writeFileSync("production-certification-artifacts/certification.json", JSON.stringify({environmentClass:"production-like-certification",error:"report_missing",passed:false,checkedAt:new Date().toISOString()}, null, 2)+"\n")'
+            runner_status=1
+          fi
+          rm -f production-certification-artifacts/runner.log
+          echo "exit_code=$runner_status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Record non-secret execution metadata
+        if: always()
+        shell: bash
+        env:
+          CERT_ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          CERT_EXPECTED_VERSION: ${{ inputs.expected_version }}
+          CERT_EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          CERT_REQUIRE_HTTPS: ${{ inputs.require_https }}
+          CERT_MAX_READY_MS: ${{ inputs.max_ready_ms }}
+          CERT_MAX_OUTBOX_PENDING: ${{ inputs.max_outbox_pending }}
+          CERT_MAX_OUTBOX_DUE: ${{ inputs.max_outbox_due }}
+          CERT_MAX_OUTBOX_WITH_ERRORS: ${{ inputs.max_outbox_with_errors }}
+          CERT_MAX_OUTBOX_OLDEST_AGE_SECONDS: ${{ inputs.max_outbox_oldest_age_seconds }}
+          CERT_MAX_INBOX_OVERDUE_UNESCALATED: ${{ inputs.max_inbox_overdue_unescalated }}
+          CERT_MAX_INBOX_ESCALATED_UNRESOLVED: ${{ inputs.max_inbox_escalated_unresolved }}
+        run: |
+          mkdir -p production-certification-artifacts
+          node <<'NODE'
+          const fs = require("node:fs");
+          const optionalNumber = (value) => value === "" || value === undefined ? null : Number(value);
+          const metadata = {
+            environmentClass: "production-like-certification",
+            environmentName: process.env.CERT_ENVIRONMENT_NAME,
+            commitSha: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            nodeVersion: process.version,
+            expected: {
+              version: process.env.CERT_EXPECTED_VERSION || "package.json",
+              revision: process.env.CERT_EXPECTED_REVISION || null,
+            },
+            requireHttps: process.env.CERT_REQUIRE_HTTPS === "true",
+            gates: {
+              maxReadyMs: Number(process.env.CERT_MAX_READY_MS),
+              maxOutboxPending: Number(process.env.CERT_MAX_OUTBOX_PENDING),
+              maxOutboxDue: Number(process.env.CERT_MAX_OUTBOX_DUE),
+              maxOutboxWithErrors: Number(process.env.CERT_MAX_OUTBOX_WITH_ERRORS),
+              maxOutboxOldestAgeSeconds: Number(process.env.CERT_MAX_OUTBOX_OLDEST_AGE_SECONDS),
+              maxInboxOverdueUnescalated: optionalNumber(process.env.CERT_MAX_INBOX_OVERDUE_UNESCALATED),
+              maxInboxEscalatedUnresolved: optionalNumber(process.env.CERT_MAX_INBOX_ESCALATED_UNRESOLVED),
+            },
+            note: "Target URL and API key are intentionally excluded from certification artifacts",
+          };
+          fs.writeFileSync(
+            "production-certification-artifacts/environment.json",
+            `${JSON.stringify(metadata, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Upload production readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-readiness-certification-${{ github.run_id }}
+          path: production-certification-artifacts/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce certification result
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.certification.outputs.exit_code }}" = "0"
