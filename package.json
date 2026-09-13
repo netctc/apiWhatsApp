@@ -23,6 +23,7 @@
     "test:capacity:external": "node scripts/external-capacity-runner.mjs",
     "certify:production": "node scripts/production-certification.mjs",
     "bundle:release-candidate": "node scripts/release-candidate-evidence.mjs",
+    "plan:release-transition": "node scripts/release-transition-evidence.mjs",
     "audit:prod": "node scripts/audit-production.mjs",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
