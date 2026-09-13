@@ -1,9 +1,11 @@
 import { jest } from "@jest/globals";
 import { OperationalHealthService } from "../src/health/operational-health.service.js";
+import { APP_VERSION } from "../src/version.js";
 
 describe("OperationalHealthService", () => {
   const originalRedisUrl = process.env.REDIS_URL;
   const originalRabbitMqUrl = process.env.RABBITMQ_URL;
+  const originalAppRevision = process.env.APP_REVISION;
   const diagnostics = jest.fn();
 
   beforeEach(() => {
@@ -22,11 +24,17 @@ describe("OperationalHealthService", () => {
     } else {
       process.env.RABBITMQ_URL = originalRabbitMqUrl;
     }
+    if (originalAppRevision === undefined) {
+      delete process.env.APP_REVISION;
+    } else {
+      process.env.APP_REVISION = originalAppRevision;
+    }
   });
 
-  it("reports process liveness without touching external dependencies", () => {
+  it("reports process liveness and safe build identity without touching external dependencies", () => {
     delete process.env.REDIS_URL;
     delete process.env.RABBITMQ_URL;
+    process.env.APP_REVISION = "fc15a222-test";
     const queryRaw = jest.fn();
     const service = new OperationalHealthService(
       { $queryRaw: queryRaw } as never,
@@ -36,9 +44,21 @@ describe("OperationalHealthService", () => {
     const report = service.live();
 
     expect(report.status).toBe("ok");
+    expect(report.version).toBe(APP_VERSION);
+    expect(report.revision).toBe("fc15a222-test");
     expect(report.uptimeSeconds).toBeGreaterThanOrEqual(0);
     expect(queryRaw).not.toHaveBeenCalled();
     expect(diagnostics).not.toHaveBeenCalled();
+  });
+
+  it("does not expose unsafe deployment revisions", () => {
+    process.env.APP_REVISION = "unsafe revision with spaces";
+    const service = new OperationalHealthService(
+      { $queryRaw: jest.fn() } as never,
+      { diagnostics } as never,
+    );
+
+    expect(service.live()).not.toHaveProperty("revision");
   });
 
   it("reports missing Redis and RabbitMQ configuration as not ready while PostgreSQL and disabled storage are up", async () => {

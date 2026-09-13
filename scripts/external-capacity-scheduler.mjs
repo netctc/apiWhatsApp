@@ -45,14 +45,12 @@ export function createMonotonicStartGate({
         return null;
       }
 
-      const waitMs = scheduledStartAtMs - current;
-      if (waitMs > 0) {
-        await sleep(waitMs);
-      }
-
-      current = now();
-      if (deadlineAtMs !== null && current >= deadlineAtMs) {
-        return null;
+      while (current < scheduledStartAtMs) {
+        await sleep(Math.max(1, scheduledStartAtMs - current));
+        current = now();
+        if (deadlineAtMs !== null && current >= deadlineAtMs) {
+          return null;
+        }
       }
 
       nextStartAtMs = current + intervalMs;
