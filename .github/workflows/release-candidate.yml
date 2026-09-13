@@ -1,0 +1,199 @@
+name: Release Candidate Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_release_candidate:
+        description: Confirm that this exact main commit should be packaged as a non-deploying release candidate
+        required: true
+        default: false
+        type: boolean
+      expected_sha:
+        description: Exact full lowercase 40-character main commit SHA to package
+        required: true
+        type: string
+      expected_version:
+        description: Optional exact semantic version; blank uses package.json
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-candidate-evidence-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact workflow commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Validate exact release candidate identity
+        id: identity
+        shell: bash
+        env:
+          RC_CONFIRM: ${{ inputs.confirm_release_candidate }}
+          RC_INPUT_SHA: ${{ inputs.expected_sha }}
+          RC_INPUT_VERSION: ${{ inputs.expected_version }}
+        run: |
+          set -euo pipefail
+          test "$RC_CONFIRM" = "true" || {
+            echo "confirm_release_candidate must be explicitly enabled" >&2
+            exit 1
+          }
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "Release candidate evidence may only be produced from main" >&2
+            exit 1
+          }
+          case "$RC_INPUT_SHA" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "expected_sha must be exactly 40 lowercase hexadecimal characters" >&2; exit 1 ;;
+          esac
+          test "$RC_INPUT_SHA" = "$GITHUB_SHA" || {
+            echo "expected_sha does not match the checked-out workflow commit" >&2
+            exit 1
+          }
+
+          version="$(node -e 'const fs=require("node:fs");process.stdout.write(JSON.parse(fs.readFileSync("package.json","utf8")).version)')"
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "package.json version is not a supported semantic version" >&2; exit 1 ;;
+          esac
+          if [ -n "$RC_INPUT_VERSION" ] && [ "$RC_INPUT_VERSION" != "$version" ]; then
+            echo "expected_version does not match package.json" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Require successful push CI for exact commit
+        id: ci
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f head_sha="$GITHUB_SHA" \
+            -f event=push \
+            -f status=success \
+            -f per_page=20 \
+            > "$response_file"
+
+          node - "$response_file" <<'NODE' >> "$GITHUB_OUTPUT"
+          const fs = require("node:fs");
+          const path = process.argv[2];
+          const payload = JSON.parse(fs.readFileSync(path, "utf8"));
+          const run = (payload.workflow_runs || []).find((candidate) =>
+            candidate.head_sha === process.env.GITHUB_SHA &&
+            candidate.head_branch === "main" &&
+            candidate.event === "push" &&
+            candidate.status === "completed" &&
+            candidate.conclusion === "success"
+          );
+          if (!run) {
+            console.error("No successful push-triggered CI run exists for this exact main commit");
+            process.exit(1);
+          }
+          console.log(`ci_run_id=${run.id}`);
+          console.log(`ci_run_url=${run.html_url}`);
+          NODE
+
+      - name: Build and archive exact production image
+        id: image
+        shell: bash
+        env:
+          RC_VERSION: ${{ steps.identity.outputs.version }}
+          RC_SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-candidate-artifacts
+          image_tag="api-whatsapp:rc-${RC_SHORT_SHA}"
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+
+          docker build \
+            --build-arg APP_VERSION="$RC_VERSION" \
+            --build-arg APP_REVISION="$GITHUB_SHA" \
+            --build-arg APP_SOURCE_URL="$source_url" \
+            --tag "$image_tag" \
+            .
+
+          image_id="$(docker image inspect --format '{{.Id}}' "$image_tag")"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image_tag")" = "$RC_VERSION"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image_tag")" = "$GITHUB_SHA"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$image_tag")" = "$source_url"
+
+          archive="release-candidate-artifacts/api-whatsapp-${RC_VERSION}-${RC_SHORT_SHA}.docker.tar.gz"
+          docker save "$image_tag" | gzip -n > "$archive"
+          test -s "$archive"
+
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Install locked production runtime dependencies
+        run: npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts
+
+      - name: Generate CycloneDX runtime SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm sbom --sbom-format cyclonedx --omit=dev --omit=peer --omit=optional \
+            > release-candidate-artifacts/runtime-sbom.cdx.json
+          node -e 'const fs=require("node:fs");const b=JSON.parse(fs.readFileSync("release-candidate-artifacts/runtime-sbom.cdx.json","utf8"));if(b.bomFormat!=="CycloneDX")process.exit(1)'
+
+      - name: Generate release candidate manifest and checksums
+        shell: bash
+        env:
+          RC_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RC_SOURCE_SHA: ${{ github.sha }}
+          RC_EXPECTED_VERSION: ${{ steps.identity.outputs.version }}
+          RC_IMAGE_ID: ${{ steps.image.outputs.image_id }}
+          RC_IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+          RC_IMAGE_ARCHIVE_PATH: ${{ steps.image.outputs.archive }}
+          RC_CI_RUN_ID: ${{ steps.ci.outputs.ci_run_id }}
+          RC_CI_RUN_URL: ${{ steps.ci.outputs.ci_run_url }}
+          RC_SOURCE_REPOSITORY: ${{ github.repository }}
+          RC_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          RC_OUTPUT_DIR: release-candidate-artifacts
+          RC_SBOM_PATH: release-candidate-artifacts/runtime-sbom.cdx.json
+        run: |
+          set -euo pipefail
+          export RC_SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export RC_NPM_VERSION="$(npm --version)"
+          npm run bundle:release-candidate
+
+      - name: Verify release candidate bundle checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-candidate-artifacts
+          sha256sum -c checksums.sha256
+
+      - name: Upload release candidate evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-whatsapp-rc-${{ steps.identity.outputs.version }}-${{ steps.identity.outputs.short_sha }}
+          path: release-candidate-artifacts/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
