@@ -1,0 +1,211 @@
+name: Release Transition Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_release_transition:
+        description: Confirm comparison of exact candidate and rollback release-candidate evidence
+        required: true
+        default: false
+        type: boolean
+      candidate_rc_run_id:
+        description: Successful Release Candidate Evidence workflow run ID for the candidate
+        required: true
+        type: string
+      rollback_rc_run_id:
+        description: Successful Release Candidate Evidence workflow run ID for the known-good rollback image
+        required: true
+        type: string
+      acknowledge_database_compatibility:
+        description: Confirm operational review that the rollback application remains compatible with any newly appended database migrations
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-transition-${{ inputs.candidate_rc_run_id }}-from-${{ inputs.rollback_rc_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout transition tooling from main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Validate transition request
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.confirm_release_transition }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_rc_run_id }}
+          ROLLBACK_RUN_ID: ${{ inputs.rollback_rc_run_id }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM" = "true" || {
+            echo "confirm_release_transition must be explicitly enabled" >&2
+            exit 1
+          }
+          test "$GITHUB_REF" = "refs/heads/main" || {
+            echo "Release transition evidence may only be generated from main" >&2
+            exit 1
+          }
+          case "$CANDIDATE_RUN_ID" in
+            ''|*[!0-9]*) echo "candidate_rc_run_id must be a positive integer" >&2; exit 1 ;;
+          esac
+          case "$ROLLBACK_RUN_ID" in
+            ''|*[!0-9]*) echo "rollback_rc_run_id must be a positive integer" >&2; exit 1 ;;
+          esac
+          test "$CANDIDATE_RUN_ID" != "0" && test "$ROLLBACK_RUN_ID" != "0"
+          test "$CANDIDATE_RUN_ID" != "$ROLLBACK_RUN_ID" || {
+            echo "candidate and rollback workflow run IDs must be distinct" >&2
+            exit 1
+          }
+
+      - name: Verify RC workflow provenance and resolve artifacts
+        id: evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_rc_run_id }}
+          ROLLBACK_RUN_ID: ${{ inputs.rollback_rc_run_id }}
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+
+          resolve_run() {
+            role="$1"
+            run_id="$2"
+            run_json="$tmp_dir/${role}-run.json"
+            artifacts_json="$tmp_dir/${role}-artifacts.json"
+
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > "$run_json"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" > "$artifacts_json"
+
+            node - "$role" "$run_json" "$artifacts_json" <<'NODE' >> "$GITHUB_OUTPUT"
+          const fs = require("node:fs");
+          const [role, runPath, artifactsPath] = process.argv.slice(2);
+          const run = JSON.parse(fs.readFileSync(runPath, "utf8"));
+          const payload = JSON.parse(fs.readFileSync(artifactsPath, "utf8"));
+
+          const validRun =
+            run.repository?.full_name === process.env.GITHUB_REPOSITORY &&
+            run.path === ".github/workflows/release-candidate.yml" &&
+            run.name === "Release Candidate Evidence" &&
+            run.event === "workflow_dispatch" &&
+            run.head_branch === "main" &&
+            run.status === "completed" &&
+            run.conclusion === "success" &&
+            /^[0-9a-f]{40}$/.test(run.head_sha || "");
+          if (!validRun) {
+            console.error(`${role} run is not a successful main Release Candidate Evidence run`);
+            process.exit(1);
+          }
+
+          const artifacts = (payload.artifacts || []).filter((artifact) =>
+            artifact &&
+            artifact.expired === false &&
+            typeof artifact.name === "string" &&
+            artifact.name.startsWith("api-whatsapp-rc-") &&
+            Number.isSafeInteger(artifact.id) &&
+            artifact.id > 0
+          );
+          if (artifacts.length !== 1) {
+            console.error(`${role} run must contain exactly one non-expired RC evidence artifact`);
+            process.exit(1);
+          }
+
+          console.log(`${role}_artifact_id=${artifacts[0].id}`);
+          console.log(`${role}_artifact_name=${artifacts[0].name}`);
+          console.log(`${role}_head_sha=${run.head_sha}`);
+          NODE
+          }
+
+          resolve_run candidate "$CANDIDATE_RUN_ID"
+          resolve_run rollback "$ROLLBACK_RUN_ID"
+
+      - name: Download and safely extract RC evidence bundles
+        id: bundles
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.evidence.outputs.candidate_artifact_id }}
+          ROLLBACK_ARTIFACT_ID: ${{ steps.evidence.outputs.rollback_artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-transition-input/candidate release-transition-input/rollback
+
+          download_bundle() {
+            role="$1"
+            artifact_id="$2"
+            zip_path="release-transition-input/${role}.zip"
+            extract_root="release-transition-input/${role}"
+
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              --output "$zip_path"
+            test -s "$zip_path"
+
+            if zipinfo -1 "$zip_path" | grep -Eq '(^/|(^|/)\.\.(/|$)|\\)'; then
+              echo "$role artifact contains an unsafe archive path" >&2
+              exit 1
+            fi
+            unzip -q "$zip_path" -d "$extract_root"
+            rm -f "$zip_path"
+
+            mapfile -t manifests < <(find "$extract_root" -type f -name release-manifest.json -print)
+            if [ "${#manifests[@]}" -ne 1 ]; then
+              echo "$role artifact must contain exactly one release-manifest.json" >&2
+              exit 1
+            fi
+            bundle_dir="$(dirname "${manifests[0]}")"
+            echo "${role}_dir=$bundle_dir" >> "$GITHUB_OUTPUT"
+          }
+
+          download_bundle candidate "$CANDIDATE_ARTIFACT_ID"
+          download_bundle rollback "$ROLLBACK_ARTIFACT_ID"
+
+      - name: Generate release transition and rollback evidence
+        shell: bash
+        env:
+          TRANSITION_CANDIDATE_DIR: ${{ steps.bundles.outputs.candidate_dir }}
+          TRANSITION_ROLLBACK_DIR: ${{ steps.bundles.outputs.rollback_dir }}
+          TRANSITION_OUTPUT_DIR: release-transition-artifacts
+          TRANSITION_ACK_DATABASE_COMPATIBILITY: ${{ inputs.acknowledge_database_compatibility }}
+        run: npm run plan:release-transition
+
+      - name: Verify transition plan checksum
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f release-transition-artifacts/release-transition-plan.sha256 ]; then
+            cd release-transition-artifacts
+            sha256sum -c release-transition-plan.sha256
+          fi
+
+      - name: Upload release transition evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-whatsapp-release-transition-${{ inputs.candidate_rc_run_id }}-from-${{ inputs.rollback_rc_run_id }}
+          path: release-transition-artifacts/
+          if-no-files-found: ignore
+          retention-days: 90
+          compression-level: 0
