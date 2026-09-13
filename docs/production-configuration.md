@@ -106,11 +106,32 @@ Production configuration validation failed (api): API_KEY_HASH_SECRET: must cont
 
 Do not add raw secret values to validation messages, logs, health responses, or CI artifacts.
 
+## Production image CI smoke
+
+The final Docker image is tested separately from TypeScript/unit validation. After all build, security, integration, migration, and load-smoke gates pass, CI builds the image with the exact package version, `GITHUB_SHA`, and repository source URL.
+
+CI then verifies the final image's OCI version/revision/source labels and baked `APP_REVISION`, and runs two offline bootstrap checks using:
+
+```text
+--network none
+--read-only
+--cap-drop ALL
+--security-opt no-new-privileges
+```
+
+The API image receives syntactically valid dependency URLs and production credentials except for one deliberately short metrics credential. It must terminate through `Production configuration validation failed (api)` and identify `METRICS_BEARER_TOKEN` before the 15-second timeout.
+
+The same image is then invoked with `node dist/worker.js`, with valid shared syntax except for an invalid revision. It must terminate through `Production configuration validation failed (worker)` and identify `APP_REVISION` before the timeout.
+
+Both checks use deterministic fake credential markers and fail CI if any marker appears in captured container output. Captured raw output is not printed when the smoke succeeds; diagnostics are sanitized before display on structural failures.
+
+This gate proves that the **packaged production image** contains the expected build identity and enforces fail-closed configuration before it can use the network. It intentionally does not prove that PostgreSQL, Redis, RabbitMQ, Meta, S3, or ClamAV are reachable. Those live checks remain the responsibility of integration tests, `/api/health/ready`, and Production Readiness Certification.
+
 ## Deployment sequence
 
 A production-like promotion should use the following order:
 
-1. obtain a successful `main` CI for the exact commit;
+1. obtain a successful `main` CI for the exact commit, including the production-image offline bootstrap smoke;
 2. generate the Release Candidate Evidence bundle for that commit;
 3. deploy the exact release-candidate image with environment/secrets mounted;
 4. allow API and worker bootstrap validation to reject unsafe configuration immediately;

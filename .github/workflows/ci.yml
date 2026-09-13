@@ -144,8 +144,48 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build production image
-        run: docker build --tag api-whatsapp:ci .
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Resolve production image identity
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node --input-type=commonjs -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+          test -n "$version"
+          source_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
+
+      - name: Build exact production image
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.image.outputs.version }}
+          APP_SOURCE_URL: ${{ steps.image.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg "APP_VERSION=$APP_VERSION" \
+            --build-arg "APP_REVISION=$GITHUB_SHA" \
+            --build-arg "APP_SOURCE_URL=$APP_SOURCE_URL" \
+            --tag api-whatsapp:ci \
+            .
+
+      - name: Verify production image identity and fail-closed bootstrap
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.image.outputs.version }}
+          APP_SOURCE_URL: ${{ steps.image.outputs.source_url }}
+        run: |
+          set -euo pipefail
+          ./scripts/docker-production-config-smoke.sh \
+            api-whatsapp:ci \
+            "$APP_VERSION" \
+            "$GITHUB_SHA" \
+            "$APP_SOURCE_URL"
 
   dependency-security:
     runs-on: ubuntu-latest
