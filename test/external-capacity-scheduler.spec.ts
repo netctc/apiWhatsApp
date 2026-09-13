@@ -6,6 +6,10 @@ interface SchedulerProbe {
     sleeps: number[];
   };
   deadline: Array<number | null>;
+  earlyWake: {
+    starts: Array<number | null>;
+    sleeps: number[];
+  };
 }
 
 async function probeScheduler(): Promise<SchedulerProbe> {
@@ -47,7 +51,36 @@ async function probeScheduler(): Promise<SchedulerProbe> {
       await deadlineGate(),
     ];
 
-    process.stdout.write(JSON.stringify({ noCatchUp: { starts, sleeps }, deadline }));
+    let earlyNow = 0;
+    let wokeEarly = false;
+    const earlySleeps = [];
+    const earlyGate = createMonotonicStartGate({
+      targetRatePerSecond: 4,
+      deadlineAtMs: 1000,
+      now: () => earlyNow,
+      sleep: async (ms) => {
+        earlySleeps.push(ms);
+        if (!wokeEarly && ms > 1) {
+          earlyNow += ms - 0.5;
+          wokeEarly = true;
+          return;
+        }
+        earlyNow += ms;
+      },
+    });
+    const earlyStarts = [
+      await earlyGate(),
+      await earlyGate(),
+      await earlyGate(),
+      await earlyGate(),
+      await earlyGate(),
+    ];
+
+    process.stdout.write(JSON.stringify({
+      noCatchUp: { starts, sleeps },
+      deadline,
+      earlyWake: { starts: earlyStarts, sleeps: earlySleeps },
+    }));
   `;
 
   const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
@@ -82,5 +115,18 @@ describe("external capacity scheduler", () => {
     expect(result.noCatchUp.starts).toEqual([0, 100, 450, 550]);
     expect(result.noCatchUp.sleeps).toEqual([100, 100]);
     expect(result.deadline).toEqual([0, 100, 200, null]);
+  });
+
+  it("does not start early when the timer wakes before the scheduled slot", async () => {
+    const result = await probeScheduler();
+    const completedStarts = result.earlyWake.starts.slice(0, 4) as number[];
+
+    expect(result.earlyWake.starts[4]).toBeNull();
+    expect(completedStarts).toHaveLength(4);
+    expect(completedStarts[0]).toBe(0);
+    for (let index = 1; index < completedStarts.length; index += 1) {
+      expect(completedStarts[index] - completedStarts[index - 1]).toBeGreaterThanOrEqual(250);
+    }
+    expect(result.earlyWake.sleeps.length).toBeGreaterThanOrEqual(4);
   });
 });
