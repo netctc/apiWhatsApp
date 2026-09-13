@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
+import { validateWorkerProductionConfig } from "../config/production-config.validator.js";
 import { MetaModule } from "../meta/meta.module.js";
 import { ObservabilityModule } from "../observability/observability.module.js";
 import { PrismaModule } from "../prisma/prisma.module.js";
@@ -10,7 +11,7 @@ import { OutboundWorkerService } from "./outbound-worker.service.js";
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true, validate: validateWorkerProductionConfig }),
     PrismaModule,
     ObservabilityModule,
     QueueModule,
